@@ -373,48 +373,55 @@ def monitor_loop():
                         log.info(f'State change: {state_name(prev_state)} -> {state_name(machine_state)}')
                     prev_state = machine_state
 
-                    # ── Wire break detection ─────────────────────────────────
+                    # ── Wire break detection (RUNNING only) ──────────────────
+                    # Only fire during active production (state 16)
+                    # Bobbin changes and maintenance while stopped generate
+                    # identical bit transitions — filter them out here
                     if wire_bits is not None and prev_wire_bits is not None:
                         if wire_bits != prev_wire_bits:
                             changed    = wire_bits ^ prev_wire_bits
                             new_breaks = wire_bits & changed
                             cleared    = prev_wire_bits & changed
 
-                            if new_breaks:
-                                log.warning(f'WIRE BREAK — bits:{bin(wire_bits)} at {puller_feet:.2f} ft')
-                                event_row = {
-                                    'Timestamp':    timestamp,
-                                    'Event':        'WIRE_BREAK',
-                                    'From_State':   state_name(prev_state) if prev_state else '',
-                                    'To_State':     state_name(machine_state) if machine_state else '',
-                                    'From_Code':    prev_wire_bits,
-                                    'To_Code':      wire_bits,
-                                    'Puller_Feet':  round(puller_feet, 4) if puller_feet else None,
-                                    'Recipe_Name':  recipe_name,
-                                    'Estop_Ok':     d.get('I_Emergency_Stop_Ok'),
-                                    'Door_Ok':      d.get('I_Door_Interlock_Ok'),
-                                    'Detail':       f'bits_changed={bin(new_breaks)}',
-                                }
-                                write_csv_row(EVENT_LOG, event_row)
-                                _wire_break_capture_rows = list(_rolling_buffer)
-                                _wire_break_capturing = True
-                                _wire_break_capture_until = now + POST_BREAK_CAPTURE_SECONDS
+                            if machine_state == 16:
+                                if new_breaks:
+                                    log.warning(f'WIRE BREAK — bits:{bin(wire_bits)} at {puller_feet:.2f} ft')
+                                    event_row = {
+                                        'Timestamp':    timestamp,
+                                        'Event':        'WIRE_BREAK',
+                                        'From_State':   state_name(prev_state) if prev_state else '',
+                                        'To_State':     state_name(machine_state) if machine_state else '',
+                                        'From_Code':    prev_wire_bits,
+                                        'To_Code':      wire_bits,
+                                        'Puller_Feet':  round(puller_feet, 4) if puller_feet else None,
+                                        'Recipe_Name':  recipe_name,
+                                        'Estop_Ok':     d.get('I_Emergency_Stop_Ok'),
+                                        'Door_Ok':      d.get('I_Door_Interlock_Ok'),
+                                        'Detail':       f'bits_changed={bin(new_breaks)}',
+                                    }
+                                    write_csv_row(EVENT_LOG, event_row)
+                                    _wire_break_capture_rows = list(_rolling_buffer)
+                                    _wire_break_capturing = True
+                                    _wire_break_capture_until = now + POST_BREAK_CAPTURE_SECONDS
 
-                            if cleared:
-                                event_row = {
-                                    'Timestamp':   timestamp,
-                                    'Event':       'WIRE_BREAK_CLEARED',
-                                    'From_State':  state_name(prev_state) if prev_state else '',
-                                    'To_State':    state_name(machine_state) if machine_state else '',
-                                    'From_Code':   prev_wire_bits,
-                                    'To_Code':     wire_bits,
-                                    'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
-                                    'Recipe_Name': recipe_name,
-                                    'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
-                                    'Door_Ok':     d.get('I_Door_Interlock_Ok'),
-                                    'Detail':      f'bits_cleared={bin(cleared)}',
-                                }
-                                write_csv_row(EVENT_LOG, event_row)
+                                if cleared:
+                                    event_row = {
+                                        'Timestamp':   timestamp,
+                                        'Event':       'WIRE_BREAK_CLEARED',
+                                        'From_State':  state_name(prev_state) if prev_state else '',
+                                        'To_State':    state_name(machine_state) if machine_state else '',
+                                        'From_Code':   prev_wire_bits,
+                                        'To_Code':     wire_bits,
+                                        'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
+                                        'Recipe_Name': recipe_name,
+                                        'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
+                                        'Door_Ok':     d.get('I_Door_Interlock_Ok'),
+                                        'Detail':      f'bits_cleared={bin(cleared)}',
+                                    }
+                                    write_csv_row(EVENT_LOG, event_row)
+                            else:
+                                log.debug(f'Wire bits changed during {state_name(machine_state)} ' 
+                                          f'(bobbin change?) — ignored: {prev_wire_bits} -> {wire_bits}')
 
                     prev_wire_bits = wire_bits
 
