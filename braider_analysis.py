@@ -219,19 +219,87 @@ fig3.update_layout(height=350, title='Machine State Timeline',
 figs.append((fig3, "Chart 3"))
 
 
-# ── Chart 4 — Production Feet ─────────────────────────────────────────────────
-print('Building chart 4: Production Feet...')
-fig4 = go.Figure()
-fig4.add_trace(go.Scatter(
-    x=process['Timestamp'], y=process['Puller_Pos_Feet'],
-    mode='lines', name='Feet Produced',
-    line=dict(color='#4fc3f7', width=1.5)
-))
-add_state_shading(fig4)
-add_wb_lines(fig4)
-fig4.update_layout(height=400, title='Cumulative Production (Puller Position)',
-                   template='plotly_dark', yaxis_title='Feet')
-figs.append((fig4, "Chart 4"))
+# ── Chart 4 — Feet Produced Per Run ──────────────────────────────────────────
+print('Building chart 4: Feet Per Run...')
+
+# Find each RUNNING segment — start and end timestamps
+# A run = Machine_State transitions to 16, then away from 16
+runs = []
+in_run = False
+run_start = None
+run_start_feet = None
+
+for _, row in process.iterrows():
+    if row['Machine_State'] == 16 and not in_run:
+        in_run = True
+        run_start = row['Timestamp']
+        run_start_feet = row['Puller_Pos_Feet']
+    elif row['Machine_State'] != 16 and in_run:
+        in_run = False
+        run_end = row['Timestamp']
+        run_end_feet = row['Puller_Pos_Feet']
+        feet_produced = run_end_feet - run_start_feet if run_end_feet and run_start_feet else 0
+        duration_mins = (run_end - run_start).total_seconds() / 60
+        # Count wire breaks during this run
+        wb_in_run = len(wb_events[
+            (wb_events['Timestamp'] >= run_start) &
+            (wb_events['Timestamp'] <= run_end)
+        ]) if not wb_events.empty else 0
+        runs.append({
+            'Run':           f'Run {len(runs)+1}',
+            'Start':         run_start,
+            'End':           run_end,
+            'Feet':          round(feet_produced, 2),
+            'Duration_Mins': round(duration_mins, 1),
+            'Wire_Breaks':   wb_in_run,
+        })
+
+# Handle run still in progress at end of log
+if in_run:
+    last = process.iloc[-1]
+    feet_produced = last['Puller_Pos_Feet'] - run_start_feet if run_start_feet else 0
+    duration_mins = (last['Timestamp'] - run_start).total_seconds() / 60
+    runs.append({
+        'Run':           f'Run {len(runs)+1} (in progress)',
+        'Start':         run_start,
+        'End':           last['Timestamp'],
+        'Feet':          round(feet_produced, 2),
+        'Duration_Mins': round(duration_mins, 1),
+        'Wire_Breaks':   0,
+    })
+
+runs_df = pd.DataFrame(runs)
+
+if runs_df.empty:
+    print('  No completed runs found yet.')
+else:
+    print(f'  Found {len(runs_df)} runs')
+    for _, r in runs_df.iterrows():
+        print(f'  {r["Run"]}: {r["Feet"]} ft in {r["Duration_Mins"]} min, {r["Wire_Breaks"]} wire breaks')
+
+    # Bar color — red if wire break occurred, green otherwise
+    bar_colors = ['#ef5350' if wb > 0 else '#66bb6a' for wb in runs_df['Wire_Breaks']]
+
+    fig4 = go.Figure()
+    fig4.add_trace(go.Bar(
+        x=runs_df['Run'],
+        y=runs_df['Feet'],
+        marker_color=bar_colors,
+        text=[f'{f} ft<br>{d} min<br>{w} WB' for f, d, w in
+              zip(runs_df['Feet'], runs_df['Duration_Mins'], runs_df['Wire_Breaks'])],
+        textposition='outside',
+        name='Feet Produced'
+    ))
+
+    fig4.update_layout(
+        height=450,
+        title='Feet Produced Per Run  |  Green = no wire breaks  |  Red = wire break occurred',
+        template='plotly_dark',
+        yaxis_title='Feet Produced',
+        xaxis_title='Run',
+        showlegend=False
+    )
+    figs.append((fig4, "Chart 4 — Feet Per Run"))
 
 
 # ── Chart 5 — Axis Sync Flags ─────────────────────────────────────────────────
