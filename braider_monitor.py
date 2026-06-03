@@ -111,11 +111,24 @@ OEE_TAGS = [
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
+from logging.handlers import RotatingFileHandler
+
+LOG_FILE = os.path.join(os.path.expanduser('~'), 'braider_monitor.log')
+
+# Caps log at 5MB, keeps 3 old files (braider_monitor.log.1, .2, .3)
+# Total max log footprint: 20MB regardless of how long the Pi runs
+_rotating_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=5 * 1024 * 1024,  # 5MB per file
+    backupCount=3
+)
+_rotating_handler.setFormatter(logging.Formatter('%(asctime)s  %(levelname)s  %(message)s'))
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s  %(levelname)s  %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(os.path.expanduser('~'), 'braider_monitor.log')),
+        _rotating_handler,
         logging.StreamHandler()
     ]
 )
