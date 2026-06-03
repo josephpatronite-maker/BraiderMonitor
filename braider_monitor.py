@@ -209,10 +209,11 @@ _wire_break_capture_rows = []
 def monitor_loop():
     global _wire_break_capturing, _wire_break_capture_until, _wire_break_capture_rows
 
-    prev_state     = None
-    prev_wire_bits = None
-    last_oee_poll  = 0
-    recipe_name    = 'Unknown'
+    prev_state          = None
+    prev_wire_bits      = None
+    last_oee_poll       = 0
+    recipe_name         = 'Unknown'
+    running_started_at  = None   # timestamp when machine last entered RUNNING state
     recipe_ppi     = None
 
     log.info(f'Starting monitor loop -> PLC {PLC_IP}')
@@ -371,19 +372,28 @@ def monitor_loop():
                         }
                         write_csv_row(EVENT_LOG, event_row)
                         log.info(f'State change: {state_name(prev_state)} -> {state_name(machine_state)}')
+                    # Track when machine enters RUNNING state
+                    if machine_state == 16 and prev_state != 16:
+                        running_started_at = now
                     prev_state = machine_state
 
                     # ── Wire break detection (RUNNING only) ──────────────────
                     # Only fire during active production (state 16)
-                    # Bobbin changes and maintenance while stopped generate
-                    # identical bit transitions — filter them out here
+                    # Ignore first 5 seconds after startup — operator threading
+                    # and manual tensioning triggers identical bit transitions
+                    STARTUP_GRACE_SECONDS = 5
+                    in_startup = (
+                        running_started_at is not None and
+                        (now - running_started_at) < STARTUP_GRACE_SECONDS
+                    )
+
                     if wire_bits is not None and prev_wire_bits is not None:
                         if wire_bits != prev_wire_bits:
                             changed    = wire_bits ^ prev_wire_bits
                             new_breaks = wire_bits & changed
                             cleared    = prev_wire_bits & changed
 
-                            if machine_state == 16:
+                            if machine_state == 16 and not in_startup:
                                 if new_breaks:
                                     log.warning(f'WIRE BREAK — bits:{bin(wire_bits)} at {puller_feet:.2f} ft')
                                     event_row = {
@@ -419,8 +429,11 @@ def monitor_loop():
                                         'Detail':      f'bits_cleared={bin(cleared)}',
                                     }
                                     write_csv_row(EVENT_LOG, event_row)
+                            elif machine_state == 16 and in_startup:
+                                log.debug(f'Wire bits changed during startup grace period — ignored: ' 
+                                          f'{prev_wire_bits} -> {wire_bits} ({now - running_started_at:.1f}s after start)')
                             else:
-                                log.debug(f'Wire bits changed during {state_name(machine_state)} ' 
+                                log.debug(f'Wire bits changed during {state_name(machine_state)} '
                                           f'(bobbin change?) — ignored: {prev_wire_bits} -> {wire_bits}')
 
                     prev_wire_bits = wire_bits
