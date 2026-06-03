@@ -19,6 +19,9 @@ figs = []  # collect all figures
 # ── Config ────────────────────────────────────────────────────────────────────
 LOG_DIR = os.path.expanduser('~/braider_logs')
 
+# Set to 'Braider_1', 'Braider_2', or 'All' to analyze both
+BRAIDER_FILTER = 'Braider_2'
+
 # ── Load files ────────────────────────────────────────────────────────────────
 print('Loading log files...')
 def load_csv(filename, **kwargs):
@@ -28,14 +31,44 @@ def load_csv(filename, **kwargs):
     print(f'  Warning: {filename} not found or empty — skipping.')
     return pd.DataFrame()
 
-process     = load_csv('process_log.csv',   parse_dates=['Timestamp'])
-events      = load_csv('event_log.csv',     parse_dates=['Timestamp'])
-oee         = load_csv('oee_log.csv',       parse_dates=['Timestamp'])
-wire_breaks = load_csv('wire_break_log.csv',parse_dates=['Timestamp'])
+def load_braider_csvs(braider_id):
+    """Load CSVs for a specific braider ID, falling back to legacy filenames."""
+    prefix = f'{braider_id}_' if braider_id != 'All' else ''
+    dfs = {}
+    for name in ['process_log', 'event_log', 'oee_log', 'wire_break_log']:
+        # Try new braider-prefixed filename first, then legacy
+        df = load_csv(f'{prefix}{name}.csv', parse_dates=['Timestamp'])
+        if df.empty and prefix:
+            df = load_csv(f'{name}.csv', parse_dates=['Timestamp'])
+        dfs[name] = df
+    return dfs
+
+if BRAIDER_FILTER == 'All':
+    # Load and combine both braiders
+    frames = {name: [] for name in ['process_log', 'event_log', 'oee_log', 'wire_break_log']}
+    for bid in ['Braider_1', 'Braider_2']:
+        d = load_braider_csvs(bid)
+        for name, df in d.items():
+            if not df.empty:
+                if 'Braider_ID' not in df.columns:
+                    df['Braider_ID'] = bid
+                frames[name].append(df)
+    process     = pd.concat(frames['process_log'])     if frames['process_log']     else pd.DataFrame()
+    events      = pd.concat(frames['event_log'])       if frames['event_log']       else pd.DataFrame()
+    oee         = pd.concat(frames['oee_log'])         if frames['oee_log']         else pd.DataFrame()
+    wire_breaks = pd.concat(frames['wire_break_log'])  if frames['wire_break_log']  else pd.DataFrame()
+else:
+    d = load_braider_csvs(BRAIDER_FILTER)
+    process     = d['process_log']
+    events      = d['event_log']
+    oee         = d['oee_log']
+    wire_breaks = d['wire_break_log']
 
 if process.empty:
-    print('ERROR: process_log.csv is missing — make sure braider_monitor.py is running.')
+    print('ERROR: No process log found — make sure braider_monitor.py is running.')
     exit()
+
+print(f'Braider filter: {BRAIDER_FILTER}')
 
 running       = process[process['Machine_State'] == 16].copy() if not process.empty else pd.DataFrame()
 wb_events     = events[events['Event'] == 'WIRE_BREAK'].copy() if not events.empty else pd.DataFrame()

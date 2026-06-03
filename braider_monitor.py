@@ -26,14 +26,15 @@ from flask import Flask, jsonify, render_template_string
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-PLC_IP = '192.168.1.102'
+PLC_IP     = '192.168.1.102'
+BRAIDER_ID = 'Braider_2'   # Change to 'Braider_1' on the other machine
 
 LOG_DIR = os.path.expanduser('~/braider_logs')
 
-PROCESS_LOG    = os.path.join(LOG_DIR, 'process_log.csv')
-EVENT_LOG      = os.path.join(LOG_DIR, 'event_log.csv')
-WIRE_BREAK_LOG = os.path.join(LOG_DIR, 'wire_break_log.csv')
-OEE_LOG        = os.path.join(LOG_DIR, 'oee_log.csv')
+PROCESS_LOG    = os.path.join(LOG_DIR, f'{BRAIDER_ID}_process_log.csv')
+EVENT_LOG      = os.path.join(LOG_DIR, f'{BRAIDER_ID}_event_log.csv')
+WIRE_BREAK_LOG = os.path.join(LOG_DIR, f'{BRAIDER_ID}_wire_break_log.csv')
+OEE_LOG        = os.path.join(LOG_DIR, f'{BRAIDER_ID}_oee_log.csv')
 
 FAST_POLL_INTERVAL       = 2   # seconds
 OEE_POLL_INTERVAL        = 60  # seconds
@@ -284,6 +285,7 @@ def monitor_loop():
 
                         oee_row = {
                             'Timestamp':          timestamp,
+                            'Braider_ID':         BRAIDER_ID,
                             'Machine_State':      machine_state,
                             'State_Name':         state_name(machine_state) if machine_state else '',
                             'Recipe_Name':        recipe_name,
@@ -306,6 +308,7 @@ def monitor_loop():
                     # ── Process log row ──────────────────────────────────────
                     process_row = {
                         'Timestamp':          timestamp,
+                        'Braider_ID':         BRAIDER_ID,
                         'Machine_State':      machine_state,
                         'State_Name':         state_name(machine_state) if machine_state else '',
                         'Table_Speed':        round(table_speed,  6) if table_speed  else None,
@@ -359,6 +362,7 @@ def monitor_loop():
                     if machine_state != prev_state and prev_state is not None:
                         event_row = {
                             'Timestamp':   timestamp,
+                            'Braider_ID':  BRAIDER_ID,
                             'Event':       'STATE_CHANGE',
                             'From_State':  state_name(prev_state),
                             'To_State':    state_name(machine_state) if machine_state else '',
@@ -398,6 +402,7 @@ def monitor_loop():
                                     log.warning(f'WIRE BREAK — bits:{bin(wire_bits)} at {puller_feet:.2f} ft')
                                     event_row = {
                                         'Timestamp':    timestamp,
+                                        'Braider_ID':   BRAIDER_ID,
                                         'Event':        'WIRE_BREAK',
                                         'From_State':   state_name(prev_state) if prev_state else '',
                                         'To_State':     state_name(machine_state) if machine_state else '',
@@ -417,6 +422,7 @@ def monitor_loop():
                                 if cleared:
                                     event_row = {
                                         'Timestamp':   timestamp,
+                                        'Braider_ID':  BRAIDER_ID,
                                         'Event':       'WIRE_BREAK_CLEARED',
                                         'From_State':  state_name(prev_state) if prev_state else '',
                                         'To_State':    state_name(machine_state) if machine_state else '',
@@ -526,7 +532,7 @@ DASHBOARD_HTML = """
     </style>
 </head>
 <body>
-    <h1>Braider Monitor</h1>
+    <h1>Braider Monitor — {{ braider_id }}</h1>
     <div class="sub">
         Noble Gas Systems — Steeger HS120/48 &nbsp;|&nbsp; 
         PLC {{ plc_ip }} &nbsp;|&nbsp; 
@@ -721,6 +727,7 @@ def dashboard():
         d=type('D', (), data)(),
         plc_ip=PLC_IP,
         log_dir=LOG_DIR,
+        braider_id=BRAIDER_ID,
     )
 
 @app.route('/api/latest')
