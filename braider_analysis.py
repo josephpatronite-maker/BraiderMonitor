@@ -21,16 +21,25 @@ LOG_DIR = os.path.expanduser('~/braider_logs')
 
 # ── Load files ────────────────────────────────────────────────────────────────
 print('Loading log files...')
-process = pd.read_csv(os.path.join(LOG_DIR, 'process_log.csv'), parse_dates=['Timestamp'])
-events  = pd.read_csv(os.path.join(LOG_DIR, 'event_log.csv'),  parse_dates=['Timestamp'])
-oee     = pd.read_csv(os.path.join(LOG_DIR, 'oee_log.csv'),    parse_dates=['Timestamp'])
+def load_csv(filename, **kwargs):
+    path = os.path.join(LOG_DIR, filename)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return pd.read_csv(path, **kwargs)
+    print(f'  Warning: {filename} not found or empty — skipping.')
+    return pd.DataFrame()
 
-wire_break_path = os.path.join(LOG_DIR, 'wire_break_log.csv')
-wire_breaks = pd.read_csv(wire_break_path, parse_dates=['Timestamp']) if os.path.exists(wire_break_path) else pd.DataFrame()
+process     = load_csv('process_log.csv',   parse_dates=['Timestamp'])
+events      = load_csv('event_log.csv',     parse_dates=['Timestamp'])
+oee         = load_csv('oee_log.csv',       parse_dates=['Timestamp'])
+wire_breaks = load_csv('wire_break_log.csv',parse_dates=['Timestamp'])
 
-running       = process[process['Machine_State'] == 16].copy()
-wb_events     = events[events['Event'] == 'WIRE_BREAK'].copy()
-state_changes = events[events['Event'] == 'STATE_CHANGE'].copy()
+if process.empty:
+    print('ERROR: process_log.csv is missing — make sure braider_monitor.py is running.')
+    exit()
+
+running       = process[process['Machine_State'] == 16].copy() if not process.empty else pd.DataFrame()
+wb_events     = events[events['Event'] == 'WIRE_BREAK'].copy() if not events.empty else pd.DataFrame()
+state_changes = events[events['Event'] == 'STATE_CHANGE'].copy() if not events.empty else pd.DataFrame()
 
 print(f'Process log:   {len(process):,} rows  ({process.Timestamp.min()} to {process.Timestamp.max()})')
 print(f'Running rows:  {len(running):,}')
@@ -50,6 +59,55 @@ def add_wb_lines(fig, row=None, col=None):
         fig.add_vline(x=str(wb['Timestamp']), **kwargs)
 
 
+# ── Helper — add running/stopped background shading ──────────────────────────
+def add_state_shading(fig, rows=None):
+    """
+    Adds green shading when RUNNING, dark shading when stopped/off.
+    rows: list of row numbers for subplots, or None for single-axis figures.
+    """
+    if process.empty:
+        return
+
+    # Build state segments — find transitions
+    states = process[['Timestamp', 'Machine_State']].copy().reset_index(drop=True)
+    segments = []
+    start = states.iloc[0]
+
+    for i in range(1, len(states)):
+        if states.iloc[i]['Machine_State'] != start['Machine_State']:
+            segments.append({
+                'start': start['Timestamp'],
+                'end':   states.iloc[i]['Timestamp'],
+                'state': start['Machine_State']
+            })
+            start = states.iloc[i]
+    # Last segment
+    segments.append({
+        'start': start['Timestamp'],
+        'end':   states.iloc[-1]['Timestamp'],
+        'state': start['Machine_State']
+    })
+
+    for seg in segments:
+        if seg['state'] == 16:
+            color, opacity = '#66bb6a', 0.07   # green — running
+        elif seg['state'] in (1,):
+            color, opacity = '#455a64', 0.10   # dark grey — off
+        else:
+            color, opacity = '#ef5350', 0.07   # red tint — stopped/fault
+
+        kwargs = dict(
+            x0=str(seg['start']), x1=str(seg['end']),
+            fillcolor=color, opacity=opacity,
+            line_width=0, layer='below'
+        )
+        if rows:
+            for row in rows:
+                fig.add_vrect(row=row, col=1, **kwargs)
+        else:
+            fig.add_vrect(**kwargs)
+
+
 # ── Chart 1 — Speed Overview ──────────────────────────────────────────────────
 print('Building chart 1: Speed Overview...')
 fig1 = make_subplots(
@@ -59,28 +117,35 @@ fig1 = make_subplots(
     vertical_spacing=0.06
 )
 
+# Resample to 2s so gaps when machine is off break the line visually
+running_gapped = running.set_index('Timestamp')[['Table_Speed','Puller_Speed','Speed_Ratio']].resample('2s').mean().reset_index()
+
 fig1.add_trace(go.Scatter(
-    x=running['Timestamp'], y=running['Table_Speed'],
+    x=running_gapped['Timestamp'], y=running_gapped['Table_Speed'],
     mode='lines', name='Table Speed',
-    line=dict(color='#4fc3f7', width=1)
+    line=dict(color='#4fc3f7', width=1),
+    connectgaps=False
 ), row=1, col=1)
 
 fig1.add_trace(go.Scatter(
-    x=running['Timestamp'], y=running['Puller_Speed'],
+    x=running_gapped['Timestamp'], y=running_gapped['Puller_Speed'],
     mode='lines', name='Puller Speed',
-    line=dict(color='#81c784', width=1)
+    line=dict(color='#81c784', width=1),
+    connectgaps=False
 ), row=2, col=1)
 
 fig1.add_trace(go.Scatter(
-    x=running['Timestamp'], y=running['Speed_Ratio'],
+    x=running_gapped['Timestamp'], y=running_gapped['Speed_Ratio'],
     mode='lines', name='Speed Ratio',
-    line=dict(color='#ffb74d', width=1)
+    line=dict(color='#ffb74d', width=1),
+    connectgaps=False
 ), row=3, col=1)
 
+add_state_shading(fig1, rows=[1, 2, 3])
 for row in [1, 2, 3]:
     add_wb_lines(fig1, row=row, col=1)
 
-fig1.update_layout(height=700, title='Speed Overview — Running State', template='plotly_dark')
+fig1.update_layout(height=700, title='Speed Overview', template='plotly_dark')
 figs.append((fig1, "Chart 1"))
 
 
@@ -97,18 +162,25 @@ print(f'  Speed ratio mean:  {mean:.6f}')
 print(f'  Normal band:       {lower:.6f} to {upper:.6f}')
 print(f'  Anomalous points:  {len(anomalies)}')
 
+# Resample to 2s intervals — gaps where machine was off become NaN, breaking the line
+ratio_gapped = ratio.set_index('Timestamp').resample('2s').mean().reset_index()
+
 fig2 = go.Figure()
-fig2.add_hrect(y0=lower, y1=upper, fillcolor='green', opacity=0.07, line_width=0)
 fig2.add_trace(go.Scatter(
-    x=ratio['Timestamp'], y=ratio['Speed_Ratio'],
+    x=ratio_gapped['Timestamp'], y=ratio_gapped['Speed_Ratio'],
     mode='lines', name='Speed Ratio',
-    line=dict(color='#ffb74d', width=1)
+    line=dict(color='#ffb74d', width=1),
+    connectgaps=False
 ))
 fig2.add_trace(go.Scatter(
     x=anomalies['Timestamp'], y=anomalies['Speed_Ratio'],
     mode='markers', name='Anomaly (±3σ)',
     marker=dict(color='red', size=8, symbol='x')
 ))
+# No state shading on chart 2 — data is running-only, shading is redundant
+# Break the line across gaps so it doesn't connect across stopped periods
+# Insert NaN rows where machine was not running to create visual gaps
+ratio_gapped = ratio.copy().set_index('Timestamp').resample('2s').mean().reset_index()
 add_wb_lines(fig2)
 fig2.add_hline(y=mean, line_color='white', line_dash='dot', line_width=1,
                annotation_text=f'mean={mean:.5f}')
@@ -140,6 +212,7 @@ for state, color in STATE_COLORS.items():
             mode='markers', name=state,
             marker=dict(color=color, size=4, symbol='square'),
         ))
+add_state_shading(fig3)
 add_wb_lines(fig3)
 fig3.update_layout(height=350, title='Machine State Timeline',
                    template='plotly_dark', yaxis_title='State')
@@ -154,6 +227,7 @@ fig4.add_trace(go.Scatter(
     mode='lines', name='Feet Produced',
     line=dict(color='#4fc3f7', width=1.5)
 ))
+add_state_shading(fig4)
 add_wb_lines(fig4)
 fig4.update_layout(height=400, title='Cumulative Production (Puller Position)',
                    template='plotly_dark', yaxis_title='Feet')
@@ -254,8 +328,11 @@ else:
 
 
 # ── Chart 7 — OEE Summary ─────────────────────────────────────────────────────
-print('Building chart 7: OEE Summary...')
-latest       = oee.iloc[-1]
+if oee.empty:
+    print('Skipping chart 7: oee_log.csv not found yet.')
+else:
+ print('Building chart 7: OEE Summary...')
+ latest       = oee.iloc[-1]
 running_hrs  = latest['Cum_Running_Hrs']
 stopped_hrs  = latest['Cum_Stopped_Hrs']
 ready_hrs    = latest['Cum_Ready_Hrs']
