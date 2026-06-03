@@ -709,9 +709,33 @@ def api_latest():
         return jsonify(_latest)
 
 
+# ── Sleep prevention ─────────────────────────────────────────────────────────
+
+def prevent_sleep():
+    """
+    Tells Windows to keep the system awake while the script runs.
+    Uses the native SetThreadExecutionState API — no admin rights needed.
+    Automatically releases when the script exits.
+    Does nothing on Linux (Pi stays awake via systemd anyway).
+    """
+    import platform
+    if platform.system() == 'Windows':
+        import ctypes
+        ES_CONTINUOUS       = 0x80000000
+        ES_SYSTEM_REQUIRED  = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+        )
+        log.info('Sleep prevention active — Windows will not sleep while script is running')
+    else:
+        log.info('Sleep prevention: Linux detected, skipping (Pi stays awake via systemd)')
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    prevent_sleep()
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
     log.info('Dashboard starting at http://0.0.0.0:5000')
