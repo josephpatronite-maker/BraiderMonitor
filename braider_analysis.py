@@ -31,16 +31,21 @@ def load_csv(filename, **kwargs):
     print(f'  Warning: {filename} not found or empty — skipping.')
     return pd.DataFrame()
 
+# Files that are optional and expected to sometimes not exist
+OPTIONAL_LOGS = {'event_log', 'wire_break_log'}
+
 def load_braider_csvs(braider_id):
-    """Load CSVs for a specific braider ID, falling back to legacy filenames."""
+    """Load CSVs for a specific braider ID."""
     prefix = f'{braider_id}_' if braider_id != 'All' else ''
     dfs = {}
     for name in ['process_log', 'event_log', 'oee_log', 'wire_break_log']:
-        # Try new braider-prefixed filename first, then legacy
-        df = load_csv(f'{prefix}{name}.csv', parse_dates=['Timestamp'])
-        if df.empty and prefix:
-            df = load_csv(f'{name}.csv', parse_dates=['Timestamp'])
-        dfs[name] = df
+        path = os.path.join(LOG_DIR, f'{prefix}{name}.csv')
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            dfs[name] = pd.read_csv(path, parse_dates=['Timestamp'])
+        else:
+            if name not in OPTIONAL_LOGS:
+                print(f'  Warning: {prefix}{name}.csv not found or empty — skipping.')
+            dfs[name] = pd.DataFrame()
     return dfs
 
 if BRAIDER_FILTER == 'All':
@@ -476,7 +481,7 @@ html_parts = ['''<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h1>Braider Production Analysis</h1>
+    <h1>Braider Production Analysis — ''' + BRAIDER_FILTER + '''</h1>
     <div class="sub">Noble Gas Systems — Steeger HS120/48 &nbsp;|&nbsp; Generated from ~/braider_logs/</div>
 ''']
 
