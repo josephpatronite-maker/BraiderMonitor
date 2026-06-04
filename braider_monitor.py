@@ -154,13 +154,12 @@ OEE_TAGS = [
 
 # Tags to watch for fault events — logged to event_log on change
 FAULT_TAGS = [
-    'Fault_4',   # Puller Servo Fault
-    'Fault_5',   # Table Servo Fault
-    'Fault_7',   # Starting Timeout
-    'Fault_9',   # Core/Mandrel Fault
-    'Fault_13',  # Puller Not at Home
-    'Fault_Cam', # Cam Profile Error (Fault 12)
-    'Fault_Calc',# Calculation Error (Fault 11)
+    'Fault_9',
+    'Fault_13',
+    'Fault_14',
+    'Fault_16',
+    'Fault_Cam',
+    'Fault_Calc',
 ]
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -967,4 +966,7 @@ if __name__ == '__main__':
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
     log.info('Dashboard starting at http://0.0.0.0:5000')
+    # Silence Flask request logs — they flood the terminal
+    import logging as _logging
+    _logging.getLogger('werkzeug').setLevel(_logging.ERROR)
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
