@@ -482,36 +482,30 @@ if 'Loop_Count' in process.columns and 'Length_To_Run' in process.columns:
     job = process[['Timestamp','Loop_Count','Length_To_Run','Run_Complete','New_Part']].copy()
     job_gapped = job.set_index('Timestamp').resample('2s').first().reset_index()
 
-    fig6b = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                          subplot_titles=('Length To Run (ft)', 'Loop Count'),
-                          vertical_spacing=0.1)
+    fig6b = go.Figure()
 
     fig6b.add_trace(go.Scatter(
         x=job_gapped['Timestamp'], y=job_gapped['Length_To_Run'],
         mode='lines', name='Length To Run',
         line=dict(color='#4fc3f7', width=1.5), connectgaps=False
-    ), row=1, col=1)
+    ))
 
-    fig6b.add_trace(go.Scatter(
-        x=job_gapped['Timestamp'], y=job_gapped['Loop_Count'],
-        mode='lines+markers', name='Loop Count',
-        line=dict(color='#81c784', width=1.5), connectgaps=False
-    ), row=2, col=1)
+    # Zero reference line — machine is at target when this crosses zero
+    fig6b.add_hline(y=0, line_color='white', line_dash='dot', line_width=1,
+                    annotation_text='target reached')
 
     # Mark vessel completions
     completions = job[job['Run_Complete'] == True] if 'Run_Complete' in job.columns else pd.DataFrame()
     for _, rc in completions.iterrows():
         fig6b.add_vline(x=str(rc['Timestamp']), line_color='#66bb6a',
-                        line_dash='dash', line_width=2, row=1, col=1)
-        fig6b.add_vline(x=str(rc['Timestamp']), line_color='#66bb6a',
-                        line_dash='dash', line_width=2, row=2, col=1)
+                        line_dash='dash', line_width=2)
 
-    add_wb_lines(fig6b, row=1, col=1)
-    add_wb_lines(fig6b, row=2, col=1)
+    add_wb_lines(fig6b)
 
-    fig6b.update_layout(height=500,
-                        title='Job Progress  |  Green = run complete  |  Red = wire break',
-                        template='plotly_dark')
+    fig6b.update_layout(height=400,
+                        title='Job Progress — Length To Run  |  Green = run complete  |  Red = wire break',
+                        template='plotly_dark',
+                        yaxis_title='Length To Run (ft)')
     figs.append((fig6b, "Chart 6b — Job Progress"))
 else:
     print('Skipping chart 6b: job progress tags not yet in process log.')
@@ -582,6 +576,64 @@ if not events.empty:
     figs.append((fig6c, "Chart 6c — Event Timeline"))
 else:
     print('Skipping chart 6c: no event log yet.')
+
+
+# ── Chart 6c2 — Safety Flags Timeline ───────────────────────────────────────
+safety_cols = ['Door_Ok', 'Estop_Ok', 'Guards_Ok', 'All_Safties_Ok', 'All_Axes_Ok', 'All_Axes_Running']
+has_safety = any(c in process.columns for c in safety_cols)
+
+if has_safety:
+    print('Building chart 6c2: Safety Flags Timeline...')
+
+    safety_colors = {
+        'Door_Ok':          '#4fc3f7',
+        'Estop_Ok':         '#81c784',
+        'Guards_Ok':        '#ffb74d',
+        'All_Safties_Ok':   '#f06292',
+        'All_Axes_Ok':      '#ce93d8',
+        'All_Axes_Running': '#80cbc4',
+    }
+
+    fig6c2 = go.Figure()
+
+    # Add state shading so you can see when machine was running
+    add_state_shading(fig6c2)
+
+    for i, (col, color) in enumerate(safety_colors.items()):
+        if col in process.columns:
+            # Offset each flag slightly so they don't overlap when all True
+            offset = i * 0.05
+            y = process[col].astype(float) + offset
+            fig6c2.add_trace(go.Scatter(
+                x=process['Timestamp'],
+                y=y,
+                mode='lines',
+                name=col.replace('_', ' '),
+                line=dict(color=color, width=1.5),
+                connectgaps=False
+            ))
+
+    # Mark any safety events — when any flag goes False
+    safety_df = process[safety_cols].copy() if all(c in process.columns for c in safety_cols) else pd.DataFrame()
+    if not safety_df.empty:
+        any_false = (safety_df == False).any(axis=1)
+        false_times = process[any_false]['Timestamp']
+        for t in false_times:
+            fig6c2.add_vline(x=str(t), line_color='#ef5350',
+                             line_dash='dot', line_width=1)
+
+    add_wb_lines(fig6c2)
+
+    fig6c2.update_layout(
+        height=400,
+        title='Safety Flags Timeline  |  1 = OK  |  0 = Not OK  |  Red dots = any flag False',
+        template='plotly_dark',
+        yaxis=dict(tickvals=[0, 1], ticktext=['NOT OK', 'OK']),
+        yaxis_title='Status'
+    )
+    figs.append((fig6c2, "Chart 6c2 — Safety Flags"))
+else:
+    print('Skipping chart 6c2: safety flag columns not found.')
 
 
 # ── Chart 6d — Motor & Sensor Health ─────────────────────────────────────────
