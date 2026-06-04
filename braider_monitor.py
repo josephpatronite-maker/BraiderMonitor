@@ -68,8 +68,6 @@ FAST_TAGS = [
     'Current_Segment',
     'realTableSpeed',
     # Speeds — additional context
-    'Horn_Gear_RPM',            # RPM equivalent of table speed — operator friendly
-    'Active_Seg_Speed',         # Target speed for current segment — deviation = load signal
     'Transition_Active',        # True during segment-to-segment speed transitions
     # Faults and wire breaks
     'No_Machine_Faults',
@@ -81,7 +79,7 @@ FAST_TAGS = [
     'Core_Break',               # Core/mandrel break detected
     'Cam_Error',                # Cam profile calculation error
     'Calc_Error',               # General calculation error
-    'Start_Warning',            # Warning condition at run start
+    'Start_Warning.DN',          # Warning condition at run start — DN bit of timer
     # Safety inputs — flip before state change, useful fault context
     'I_Door_Interlock_Ok',
     'I_Emergency_Stop_Ok',
@@ -107,20 +105,11 @@ FAST_TAGS = [
     'Current_Minutes.ACC',
     'Current_Seconds.ACC',
     # Job definition
-    'Discrete_Distance',
-    'Discrete_Loops',
-    'Loop_Length_Feet',
-    'Loop_Count',               # Current loop count within the job — vessel counter
     'Length_To_Run',            # Remaining length to complete job — production progress
     'Run_Complete',             # True when a job run completes — production event trigger
-    'Carrier_Mode',
-    'Current_Ratio',
     # Taper sensor (Keyence IX-H2000)
     'Taper_Sensor_Input',       # Raw sensor input — braid diameter measurement
-    'PPI_Pos',                  # Sensor-measured PPI — validate against calculated PPI
     'Sensor_Mode_Enable',       # Taper sensor mode active
-    'Tube_Dia_mm',              # Vessel diameter in mm — quality metric
-    'Hi_PPI_Running',           # High PPI mode active
     'New_Part_ONS',             # New vessel start one-shot pulse
     'New_Part_Latch',           # New vessel detection latched
     'PPI_Change_ONS',           # PPI changed mid-run
@@ -150,6 +139,12 @@ OEE_TAGS = [
     'ABORTED_Hours.ACC',        # Time spent in fault state — downtime analysis
     'ABORTING_Hours.ACC',       # Time spent in fault recovery
     'TOTAL_RUNNING_Hours.ACC',  # Alternate running hours counter
+    # Job definition — slow changing, set at recipe load
+    'Discrete_Distance',        # Target vessel length in feet
+    'Discrete_Loops',           # Number of braid passes
+    'Loop_Length_Feet',         # Length per loop
+    'Carrier_Mode',             # Carrier configuration mode
+    'Current_Ratio',            # Current gear ratio
 ]
 
 # Tags to watch for fault events — logged to event_log on change
@@ -390,6 +385,11 @@ def monitor_loop():
                             'Timestamp':          timestamp,
                             'Braider_ID':         BRAIDER_ID,
                             'Machine_State':      machine_state,
+                            'Discrete_Distance':  od.get('Discrete_Distance'),
+                            'Discrete_Loops':     od.get('Discrete_Loops'),
+                            'Loop_Length_Feet':   od.get('Loop_Length_Feet'),
+                            'Carrier_Mode':       od.get('Carrier_Mode'),
+                            'Current_Ratio':      od.get('Current_Ratio'),
                             'State_Name':         state_name(machine_state) if machine_state else '',
                             'Recipe_Name':        recipe_name,
                             'Recipe_Number':      od.get('HMI_Recipe_Number'),
@@ -440,11 +440,6 @@ def monitor_loop():
                         'AxisSynced_4':       d.get('AxisSynced_OS4'),
                         'AxisSynced_5':       d.get('AxisSynced_OS5'),
                         # Job context
-                        'Discrete_Distance':  d.get('Discrete_Distance'),
-                        'Discrete_Loops':     d.get('Discrete_Loops'),
-                        'Loop_Length_Feet':   d.get('Loop_Length_Feet'),
-                        'Carrier_Mode':       d.get('Carrier_Mode'),
-                        'Current_Ratio':      d.get('Current_Ratio'),
                         'Recipe_Name':        recipe_name,
                         'Recipe_PPI':         recipe_ppi,
                         # VFD load indicators
@@ -456,8 +451,6 @@ def monitor_loop():
                         'VFD_Active':         d.get('Table_Drive:I.Active'),
                         'VFD_AtReference':    d.get('Table_Drive:I.AtReference'),
                         # Speeds — additional
-                        'Horn_Gear_RPM':      d.get('Horn_Gear_RPM'),
-                        'Active_Seg_Speed':   d.get('Active_Seg_Speed'),
                         'Transition_Active':  d.get('Transition_Active'),
                         # Faults
                         'Machine_Faults':     d.get('Machine_Faults'),
@@ -465,21 +458,17 @@ def monitor_loop():
                         'Core_Break':         d.get('Core_Break'),
                         'Cam_Error':          d.get('Cam_Error'),
                         'Calc_Error':         d.get('Calc_Error'),
-                        'Start_Warning':      d.get('Start_Warning'),
+                        'Start_Warning':      d.get('Start_Warning.DN'),
                         'I_Table_Motor_OL':   d.get('I_Table_Motor_OL'),
                         'I_CoreBreak_Sensor': d.get('I_CoreBreak_Sensor'),
                         'I_Triaxial_WB':      d.get('I_Triaxial_WB'),
                         'Puller_Pos_Error':   d.get('Puller_Position_Error'),
                         # Job progress
-                        'Loop_Count':         d.get('Loop_Count'),
                         'Length_To_Run':      d.get('Length_To_Run'),
                         'Run_Complete':       d.get('Run_Complete'),
                         # Taper sensor
                         'Taper_Sensor':       d.get('Taper_Sensor_Input'),
-                        'PPI_Pos':            d.get('PPI_Pos'),
                         'Sensor_Mode':        d.get('Sensor_Mode_Enable'),
-                        'Tube_Dia_mm':        d.get('Tube_Dia_mm'),
-                        'Hi_PPI_Running':     d.get('Hi_PPI_Running'),
                         'New_Part':           d.get('New_Part_Latch'),
                         'PPI_Change':         d.get('PPI_Change_ONS'),
                         # Inactivity
