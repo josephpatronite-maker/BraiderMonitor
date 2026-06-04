@@ -154,12 +154,13 @@ OEE_TAGS = [
 
 # Tags to watch for fault events — logged to event_log on change
 FAULT_TAGS = [
-    'Fault_9',
-    'Fault_13',
-    'Fault_14',
-    'Fault_16',
-    'Fault_Cam',
-    'Fault_Calc',
+    'Fault_4',   # Puller Servo Fault
+    'Fault_5',   # Table Servo Fault
+    'Fault_7',   # Starting Timeout
+    'Fault_9',   # Core/Mandrel Fault
+    'Fault_13',  # Puller Not at Home
+    'Fault_Cam', # Cam Profile Error (Fault 12)
+    'Fault_Calc',# Calculation Error (Fault 11)
 ]
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
