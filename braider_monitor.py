@@ -200,6 +200,20 @@ def state_name(code):
 
 def write_csv_row(filepath, row: dict):
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
+    if file_exists:
+        # Check if the columns match — if not, archive the old file and start fresh
+        with open(filepath, 'r', newline='') as f:
+            existing_headers = f.readline().strip().split(',')
+        new_headers = list(row.keys())
+        if existing_headers != new_headers:
+            # Archive old file with timestamp so data is never lost
+            from datetime import datetime
+            archive_name = filepath.replace('.csv', f'_archived_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+            os.rename(filepath, archive_name)
+            log.warning(f'Column mismatch detected — archived old file to {os.path.basename(archive_name)}')
+            file_exists = False
+
     with open(filepath, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if not file_exists:
