@@ -522,6 +522,10 @@ if not events.empty:
     print('Building chart 6c: Fault & Event Timeline...')
     
     all_events = events.copy()
+    # Fill NaN in text columns so hover labels show cleanly
+    for col in ['Detail', 'To_State', 'From_State', 'Recipe_Name']:
+        if col in all_events.columns:
+            all_events[col] = all_events[col].fillna('')
     EVENT_COLORS = {
         'STATE_CHANGE':      '#4fc3f7',
         'WIRE_BREAK':        '#ef5350',
@@ -534,14 +538,30 @@ if not events.empty:
         mask = all_events['Event'] == event_type
         if mask.any():
             subset = all_events[mask]
+            # Build descriptive hover text per event type
+            if event_type == 'STATE_CHANGE':
+                hover_text = (
+                    subset['From_State'] + ' → ' + subset['To_State'] +
+                    '<br>Feet: ' + subset['Puller_Feet'].astype(str) +
+                    '<br>Recipe: ' + subset['Recipe_Name']
+                )
+            elif event_type in ('WIRE_BREAK', 'WIRE_BREAK_CLEARED'):
+                hover_text = (
+                    subset['Detail'] +
+                    '<br>Feet: ' + subset['Puller_Feet'].astype(str) +
+                    '<br>Recipe: ' + subset['Recipe_Name']
+                )
+            else:
+                hover_text = subset['Detail']
+
             fig6c.add_trace(go.Scatter(
                 x=subset['Timestamp'],
                 y=[event_type] * len(subset),
                 mode='markers',
                 name=event_type,
-                marker=dict(color=color, size=10, symbol='diamond'),
-                text=subset.get('Detail', subset.get('To_State', '')),
-                hovertemplate='%{x}<br>%{text}<extra></extra>'
+                marker=dict(color=color, size=12, symbol='diamond'),
+                text=hover_text,
+                hovertemplate='<b>%{y}</b><br>%{x}<br>%{text}<extra></extra>'
             ))
     
     # Fault events from FAULT_ prefix
