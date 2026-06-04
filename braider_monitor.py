@@ -67,14 +67,27 @@ FAST_TAGS = [
     'Active_Segment',
     'Current_Segment',
     'realTableSpeed',
+    # Speeds — additional context
+    'Horn_Gear_RPM',            # RPM equivalent of table speed — operator friendly
+    'Active_Seg_Speed',         # Target speed for current segment — deviation = load signal
+    'Transition_Active',        # True during segment-to-segment speed transitions
     # Faults and wire breaks
     'No_Machine_Faults',
     'No_Machine_Msgs',
+    'Machine_Faults',           # Fault bitmask — specific fault codes
     'Local:1:I.Data',
     'Local:1:I.Fault',
+    'WIre_Break_Detected',      # Cleaner wire break flag (note: typo in PLC tag name is intentional)
+    'Core_Break',               # Core/mandrel break detected
+    'Cam_Error',                # Cam profile calculation error
+    'Calc_Error',               # General calculation error
+    'Start_Warning',            # Warning condition at run start
     # Safety inputs — flip before state change, useful fault context
     'I_Door_Interlock_Ok',
     'I_Emergency_Stop_Ok',
+    'I_Table_Motor_OL',         # Table motor overload relay — mechanical overload precursor
+    'I_CoreBreak_Sensor',       # Core break sensor input
+    'I_Triaxial_WB',            # Triaxial wire break input
     'Machine.Estops_Ok',
     'Machine.Guards_Ok',
     'Machine.All_Safties_Ok',
@@ -86,6 +99,9 @@ FAST_TAGS = [
     'AxisSynced_OS3',
     'AxisSynced_OS4',
     'AxisSynced_OS5',
+    # Servo/motion health
+    'Puller_Position_Error',    # Puller following error — mechanical load indicator
+    'Table_Drive:I.AtReference', # True when VFD reaches commanded speed
     # Current state elapsed time — real-time OEE
     'Current_Hours.ACC',
     'Current_Minutes.ACC',
@@ -94,8 +110,30 @@ FAST_TAGS = [
     'Discrete_Distance',
     'Discrete_Loops',
     'Loop_Length_Feet',
+    'Loop_Count',               # Current loop count within the job — vessel counter
+    'Length_To_Run',            # Remaining length to complete job — production progress
+    'Run_Complete',             # True when a job run completes — production event trigger
     'Carrier_Mode',
     'Current_Ratio',
+    # Taper sensor (Keyence IX-H2000)
+    'Taper_Sensor_Input',       # Raw sensor input — braid diameter measurement
+    'PPI_Pos',                  # Sensor-measured PPI — validate against calculated PPI
+    'Sensor_Mode_Enable',       # Taper sensor mode active
+    'Tube_Dia_mm',              # Vessel diameter in mm — quality metric
+    'Hi_PPI_Running',           # High PPI mode active
+    'New_Part_ONS',             # New vessel start one-shot pulse
+    'New_Part_Latch',           # New vessel detection latched
+    'PPI_Change_ONS',           # PPI changed mid-run
+    # Inactivity
+    'Inactivity_Timer.ACC',     # Time machine has been idle — alert trigger
+    # VFD feedback — actual vs commanded frequency (load indicator)
+    'Table_Drive:I.OutputFreq',
+    'Table_Drive:O.FreqCommand',
+    'Table_Drive:I.Faulted',
+    'Table_Drive:I.Active',
+    # Wire break recovery
+    'WireBreak_Move',           # Distance machine backed up after wire break
+    'EStop_Recover',            # E-stop recovery sequence active
 ]
 
 # 60s poll — OEE accumulators + recipe
@@ -108,6 +146,20 @@ OEE_TAGS = [
     'HMI_Mandrel_Mode',
     'PowerOn_Days.ACC',
     'PowerOn_Hours.ACC',
+    'Triaxial_Enable',          # Whether triaxial detection is active this recipe
+    'ABORTED_Hours.ACC',        # Time spent in fault state — downtime analysis
+    'ABORTING_Hours.ACC',       # Time spent in fault recovery
+    'TOTAL_RUNNING_Hours.ACC',  # Alternate running hours counter
+]
+
+# Tags to watch for fault events — logged to event_log on change
+FAULT_TAGS = [
+    'Fault_9',
+    'Fault_13',
+    'Fault_14',
+    'Fault_16',
+    'Fault_Cam',
+    'Fault_Calc',
 ]
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -344,6 +396,46 @@ def monitor_loop():
                         'Current_Ratio':      d.get('Current_Ratio'),
                         'Recipe_Name':        recipe_name,
                         'Recipe_PPI':         recipe_ppi,
+                        # VFD load indicators
+                        'VFD_Freq_Actual':    d.get('Table_Drive:I.OutputFreq'),
+                        'VFD_Freq_Command':   d.get('Table_Drive:O.FreqCommand'),
+                        'VFD_Freq_Delta':     (d.get('Table_Drive:O.FreqCommand', 0) or 0) -
+                                              (d.get('Table_Drive:I.OutputFreq', 0) or 0),
+                        'VFD_Faulted':        d.get('Table_Drive:I.Faulted'),
+                        'VFD_Active':         d.get('Table_Drive:I.Active'),
+                        'VFD_AtReference':    d.get('Table_Drive:I.AtReference'),
+                        # Speeds — additional
+                        'Horn_Gear_RPM':      d.get('Horn_Gear_RPM'),
+                        'Active_Seg_Speed':   d.get('Active_Seg_Speed'),
+                        'Transition_Active':  d.get('Transition_Active'),
+                        # Faults
+                        'Machine_Faults':     d.get('Machine_Faults'),
+                        'Wire_Break_Detected':d.get('WIre_Break_Detected'),
+                        'Core_Break':         d.get('Core_Break'),
+                        'Cam_Error':          d.get('Cam_Error'),
+                        'Calc_Error':         d.get('Calc_Error'),
+                        'Start_Warning':      d.get('Start_Warning'),
+                        'I_Table_Motor_OL':   d.get('I_Table_Motor_OL'),
+                        'I_CoreBreak_Sensor': d.get('I_CoreBreak_Sensor'),
+                        'I_Triaxial_WB':      d.get('I_Triaxial_WB'),
+                        'Puller_Pos_Error':   d.get('Puller_Position_Error'),
+                        # Job progress
+                        'Loop_Count':         d.get('Loop_Count'),
+                        'Length_To_Run':      d.get('Length_To_Run'),
+                        'Run_Complete':       d.get('Run_Complete'),
+                        # Taper sensor
+                        'Taper_Sensor':       d.get('Taper_Sensor_Input'),
+                        'PPI_Pos':            d.get('PPI_Pos'),
+                        'Sensor_Mode':        d.get('Sensor_Mode_Enable'),
+                        'Tube_Dia_mm':        d.get('Tube_Dia_mm'),
+                        'Hi_PPI_Running':     d.get('Hi_PPI_Running'),
+                        'New_Part':           d.get('New_Part_Latch'),
+                        'PPI_Change':         d.get('PPI_Change_ONS'),
+                        # Inactivity
+                        'Inactivity_Secs':    d.get('Inactivity_Timer.ACC'),
+                        # Wire break recovery
+                        'WireBreak_Move':     d.get('WireBreak_Move'),
+                        'EStop_Recover':      d.get('EStop_Recover'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
@@ -444,6 +536,28 @@ def monitor_loop():
 
                     prev_wire_bits = wire_bits
 
+                    # ── Fault tag change detection ───────────────────────────
+                    # Log to event_log when any specific fault tag becomes True
+                    for ft in FAULT_TAGS:
+                        val = d.get(ft)
+                        if val:
+                            event_row = {
+                                'Timestamp':   timestamp,
+                                'Braider_ID':  BRAIDER_ID,
+                                'Event':       f'FAULT_{ft}',
+                                'From_State':  state_name(machine_state) if machine_state else '',
+                                'To_State':    '',
+                                'From_Code':   machine_state,
+                                'To_Code':     machine_state,
+                                'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
+                                'Recipe_Name': recipe_name,
+                                'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
+                                'Door_Ok':     d.get('I_Door_Interlock_Ok'),
+                                'Detail':      f'{ft}={val}',
+                            }
+                            write_csv_row(EVENT_LOG, event_row)
+                            log.warning(f'FAULT TAG: {ft} = {val}')
+
                     # ── Update dashboard state ───────────────────────────────
                     with _lock:
                         _latest.update({
@@ -480,6 +594,29 @@ def monitor_loop():
                             'cum_ready_hrs':      cum_ready,
                             'recipe_modified':    recipe_modified,
                             'mandrel_mode':       mandrel_mode,
+                            'vfd_freq_actual':    d.get('Table_Drive:I.OutputFreq'),
+                            'vfd_freq_command':   d.get('Table_Drive:O.FreqCommand'),
+                            'vfd_freq_delta':     (d.get('Table_Drive:O.FreqCommand', 0) or 0) -
+                                                  (d.get('Table_Drive:I.OutputFreq', 0) or 0),
+                            'vfd_faulted':        d.get('Table_Drive:I.Faulted'),
+                            'vfd_at_ref':         d.get('Table_Drive:I.AtReference'),
+                            'horn_gear_rpm':      d.get('Horn_Gear_RPM'),
+                            'active_seg_speed':   d.get('Active_Seg_Speed'),
+                            'transition_active':  d.get('Transition_Active'),
+                            'machine_faults':     d.get('Machine_Faults'),
+                            'wire_break_detected':d.get('WIre_Break_Detected'),
+                            'core_break':         d.get('Core_Break'),
+                            'i_table_motor_ol':   d.get('I_Table_Motor_OL'),
+                            'i_triaxial_wb':       d.get('I_Triaxial_WB'),
+                            'loop_count':         d.get('Loop_Count'),
+                            'length_to_run':      d.get('Length_To_Run'),
+                            'run_complete':       d.get('Run_Complete'),
+                            'taper_sensor':       d.get('Taper_Sensor_Input'),
+                            'tube_dia_mm':        d.get('Tube_Dia_mm'),
+                            'ppi_pos':            d.get('PPI_Pos'),
+                            'new_part':           d.get('New_Part_Latch'),
+                            'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
+                            'estop_recover':      d.get('EStop_Recover'),
                             'connected':          True,
                         })
 
@@ -594,7 +731,10 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Table Speed</div>
             <div class="value">{{ d.table_speed or '—' }}</div>
-            <div class="unit">rev/s</div>
+            <div class="unit">
+                rev/s
+                {% if d.horn_gear_rpm %}&nbsp;|&nbsp; {{ d.horn_gear_rpm }} RPM{% endif %}
+            </div>
         </div>
 
         <div class="card">
@@ -608,33 +748,82 @@ DASHBOARD_HTML = """
             <div class="value" style="font-size:20px">
                 {% if d.speed_ratio %}{{ "%.5f"|format(d.speed_ratio) }}{% else %}—{% endif %}
             </div>
-            <div class="unit">puller ÷ table (PPI proxy)</div>
+            <div class="unit">
+                puller ÷ table
+                {% if d.transition_active %}&nbsp;<span class="warn">TRANSITIONING</span>{% endif %}
+            </div>
         </div>
+
+        <div class="card">
+            <div class="label">Segment Speed</div>
+            <div class="value" style="font-size:20px">{{ d.active_seg_speed or '—' }}</div>
+            <div class="unit">target rev/s for current segment</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Taper Sensor</div>
+            <div class="value" style="font-size:20px">
+                {% if d.tube_dia_mm %}{{ d.tube_dia_mm }} mm{% elif d.ppi_pos %}{{ d.ppi_pos }} PPI{% else %}—{% endif %}
+            </div>
+            <div class="unit">
+                {% if d.taper_sensor %}raw: {{ d.taper_sensor }}{% endif %}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="label">Job Progress</div>
+            <div class="value" style="font-size:20px">
+                {% if d.length_to_run %}{{ d.length_to_run }} ft left{% else %}—{% endif %}
+            </div>
+            <div class="unit">
+                Loop {{ d.loop_count or '—' }}
+                {% if d.run_complete %}&nbsp;<span class="ok">✓ RUN COMPLETE</span>{% endif %}
+                {% if d.new_part %}&nbsp;<span class="ok">NEW PART</span>{% endif %}
+            </div>
+        </div>
+
+    </div>
+
+    <div class="section">Wire Breaks &amp; Faults</div>
+    <div class="grid">
 
         <div class="card">
             <div class="label">Wire Break Inputs</div>
             <div class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
                 {{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}
             </div>
-            <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = 3</div>
+            <div class="unit">
+                Local:1:I.Data &nbsp;|&nbsp; normal = 3
+                {% if d.wire_break_detected %}&nbsp;<span class="fault blink">WB DETECTED</span>{% endif %}
+            </div>
         </div>
 
-    </div>
-
-    <div class="section">Safety &amp; Axes</div>
-    <div class="grid">
+        <div class="card">
+            <div class="label">Triaxial / Core</div>
+            <div class="value" style="font-size:14px; line-height:1.8">
+                <span class="{{ 'fault blink' if d.i_triaxial_wb else 'ok' }}">
+                    {{ '✗ TRIAXIAL WB' if d.i_triaxial_wb else '✓ Triaxial OK' }}
+                </span><br>
+                <span class="{{ 'fault blink' if d.core_break else 'ok' }}">
+                    {{ '✗ CORE BREAK' if d.core_break else '✓ Core OK' }}
+                </span>
+            </div>
+        </div>
 
         <div class="card">
             <div class="label">Faults</div>
             <div class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
                 {% if d.no_faults %}NONE{% else %}FAULT{% endif %}
             </div>
+            <div class="unit">
+                {% if d.machine_faults %}code: {{ d.machine_faults }}{% endif %}
+            </div>
         </div>
 
         <div class="card">
             <div class="label">Safety Inputs</div>
             <div class="value" style="font-size:14px; line-height:1.8">
-                <span class="{{ 'ok' if d.estop_ok else 'fault' }}">
+                <span class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
                     {{ '✓' if d.estop_ok else '✗' }} E-Stop
                 </span><br>
                 <span class="{{ 'ok' if d.door_ok else 'fault' }}">
@@ -642,6 +831,9 @@ DASHBOARD_HTML = """
                 </span><br>
                 <span class="{{ 'ok' if d.guards_ok else 'fault' }}">
                     {{ '✓' if d.guards_ok else '✗' }} Guards
+                </span><br>
+                <span class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
+                    {{ '✗ MOTOR OL' if d.i_table_motor_ol else '✓ Motor OK' }}
                 </span>
             </div>
         </div>
@@ -658,13 +850,21 @@ DASHBOARD_HTML = """
                 </span>
                 {% endfor %}
             </div>
-            <div class="unit" style="margin-top:6px">all green = normal</div>
+            <div class="unit" style="margin-top:6px">
+                all green = normal
+                {% if d.estop_recover %}&nbsp;<span class="warn">ESTOP RECOVER</span>{% endif %}
+            </div>
         </div>
 
         <div class="card">
-            <div class="label">Axes Running</div>
-            <div class="value {% if d.all_axes_running %}ok{% else %}fault{% endif %}">
-                {% if d.all_axes_running %}YES{% else %}NO{% endif %}
+            <div class="label">VFD Freq — Actual / Command</div>
+            <div class="value" style="font-size:18px">
+                {{ d.vfd_freq_actual or '—' }} / {{ d.vfd_freq_command or '—' }}
+            </div>
+            <div class="unit">
+                delta: {{ d.vfd_freq_delta or '—' }}
+                {% if d.vfd_at_ref %}&nbsp;<span class="ok">AT REF</span>{% endif %}
+                {% if d.vfd_faulted %}&nbsp;<span class="fault blink">VFD FAULT</span>{% endif %}
             </div>
         </div>
 

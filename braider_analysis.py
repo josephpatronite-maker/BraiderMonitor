@@ -340,6 +340,48 @@ else:
     figs.append((fig4, "Chart 4 — Feet Per Run"))
 
 
+# ── Chart 5b — VFD Frequency Delta ──────────────────────────────────────────
+# Difference between commanded and actual VFD frequency
+# When motor is under load, actual lags command — deviation = load signal
+if 'VFD_Freq_Command' in process.columns and 'VFD_Freq_Actual' in process.columns:
+    print('Building chart 5b: VFD Frequency Delta...')
+    vfd = running[['Timestamp','VFD_Freq_Command','VFD_Freq_Actual','VFD_Freq_Delta']].dropna()
+    vfd_gapped = vfd.set_index('Timestamp').resample('2s').mean().reset_index()
+
+    fig5b = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                          subplot_titles=('VFD Frequency — Actual vs Command',
+                                          'Frequency Delta (Command - Actual)'),
+                          vertical_spacing=0.1)
+
+    fig5b.add_trace(go.Scatter(
+        x=vfd_gapped['Timestamp'], y=vfd_gapped['VFD_Freq_Command'],
+        mode='lines', name='Command', line=dict(color='#4fc3f7', width=1),
+        connectgaps=False
+    ), row=1, col=1)
+
+    fig5b.add_trace(go.Scatter(
+        x=vfd_gapped['Timestamp'], y=vfd_gapped['VFD_Freq_Actual'],
+        mode='lines', name='Actual', line=dict(color='#81c784', width=1),
+        connectgaps=False
+    ), row=1, col=1)
+
+    fig5b.add_trace(go.Scatter(
+        x=vfd_gapped['Timestamp'], y=vfd_gapped['VFD_Freq_Delta'],
+        mode='lines', name='Delta', line=dict(color='#ffb74d', width=1.5),
+        connectgaps=False
+    ), row=2, col=1)
+
+    fig5b.add_hline(y=0, line_color='white', line_dash='dot', line_width=1, row=2, col=1)
+    add_wb_lines(fig5b, row=1, col=1)
+    add_wb_lines(fig5b, row=2, col=1)
+
+    fig5b.update_layout(height=500, title='VFD Load Indicator — Freq Delta',
+                        template='plotly_dark')
+    figs.append((fig5b, "Chart 5b — VFD Frequency Delta"))
+else:
+    print('Skipping chart 5b: VFD tags not yet in process log.')
+
+
 # ── Chart 5 — Axis Sync Flags ─────────────────────────────────────────────────
 print('Building chart 5: Axis Sync Flags...')
 axis_cols = ['AxisSynced_1','AxisSynced_2','AxisSynced_3','AxisSynced_4','AxisSynced_5']
@@ -431,6 +473,145 @@ else:
         template='plotly_dark'
     )
     figs.append((fig6, "Chart 6 — Wire Break Overlay"))
+
+
+# ── Chart 6b — Job Progress ──────────────────────────────────────────────────
+# Loop count, length to run, vessel completions
+if 'Loop_Count' in process.columns and 'Length_To_Run' in process.columns:
+    print('Building chart 6b: Job Progress...')
+    job = process[['Timestamp','Loop_Count','Length_To_Run','Run_Complete','New_Part']].copy()
+    job_gapped = job.set_index('Timestamp').resample('2s').first().reset_index()
+
+    fig6b = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                          subplot_titles=('Length To Run (ft)', 'Loop Count'),
+                          vertical_spacing=0.1)
+
+    fig6b.add_trace(go.Scatter(
+        x=job_gapped['Timestamp'], y=job_gapped['Length_To_Run'],
+        mode='lines', name='Length To Run',
+        line=dict(color='#4fc3f7', width=1.5), connectgaps=False
+    ), row=1, col=1)
+
+    fig6b.add_trace(go.Scatter(
+        x=job_gapped['Timestamp'], y=job_gapped['Loop_Count'],
+        mode='lines+markers', name='Loop Count',
+        line=dict(color='#81c784', width=1.5), connectgaps=False
+    ), row=2, col=1)
+
+    # Mark vessel completions
+    completions = job[job['Run_Complete'] == True] if 'Run_Complete' in job.columns else pd.DataFrame()
+    for _, rc in completions.iterrows():
+        fig6b.add_vline(x=str(rc['Timestamp']), line_color='#66bb6a',
+                        line_dash='dash', line_width=2, row=1, col=1)
+        fig6b.add_vline(x=str(rc['Timestamp']), line_color='#66bb6a',
+                        line_dash='dash', line_width=2, row=2, col=1)
+
+    add_wb_lines(fig6b, row=1, col=1)
+    add_wb_lines(fig6b, row=2, col=1)
+
+    fig6b.update_layout(height=500,
+                        title='Job Progress  |  Green = run complete  |  Red = wire break',
+                        template='plotly_dark')
+    figs.append((fig6b, "Chart 6b — Job Progress"))
+else:
+    print('Skipping chart 6b: job progress tags not yet in process log.')
+
+
+# ── Chart 6c — Fault & Wire Break Events Timeline ────────────────────────────
+if not events.empty:
+    print('Building chart 6c: Fault & Event Timeline...')
+    
+    all_events = events.copy()
+    EVENT_COLORS = {
+        'STATE_CHANGE':      '#4fc3f7',
+        'WIRE_BREAK':        '#ef5350',
+        'WIRE_BREAK_CLEARED':'#ffb74d',
+    }
+    
+    fig6c = go.Figure()
+    
+    for event_type, color in EVENT_COLORS.items():
+        mask = all_events['Event'] == event_type
+        if mask.any():
+            subset = all_events[mask]
+            fig6c.add_trace(go.Scatter(
+                x=subset['Timestamp'],
+                y=[event_type] * len(subset),
+                mode='markers',
+                name=event_type,
+                marker=dict(color=color, size=10, symbol='diamond'),
+                text=subset.get('Detail', subset.get('To_State', '')),
+                hovertemplate='%{x}<br>%{text}<extra></extra>'
+            ))
+    
+    # Fault events from FAULT_ prefix
+    fault_events = all_events[all_events['Event'].str.startswith('FAULT_', na=False)]
+    if not fault_events.empty:
+        fig6c.add_trace(go.Scatter(
+            x=fault_events['Timestamp'],
+            y=fault_events['Event'],
+            mode='markers',
+            name='Fault',
+            marker=dict(color='#ab47bc', size=10, symbol='x'),
+            text=fault_events.get('Detail', ''),
+            hovertemplate='%{x}<br>%{y}<br>%{text}<extra></extra>'
+        ))
+
+    fig6c.update_layout(height=400, title='Event Timeline — All Events',
+                        template='plotly_dark', yaxis_title='Event Type')
+    figs.append((fig6c, "Chart 6c — Event Timeline"))
+else:
+    print('Skipping chart 6c: no event log yet.')
+
+
+# ── Chart 6d — Motor & Sensor Health ─────────────────────────────────────────
+sensor_cols = ['Taper_Sensor', 'Tube_Dia_mm', 'PPI_Pos']
+has_sensor = any(c in process.columns for c in sensor_cols)
+has_motor  = 'I_Table_Motor_OL' in process.columns
+
+if has_sensor or has_motor:
+    print('Building chart 6d: Motor & Sensor Health...')
+    rows_needed = sum([has_sensor, has_motor])
+    titles = []
+    if has_sensor: titles.append('Taper Sensor / Tube Diameter')
+    if has_motor:  titles.append('Motor Overload Flag')
+
+    fig6d = make_subplots(rows=rows_needed, cols=1, shared_xaxes=True,
+                          subplot_titles=titles, vertical_spacing=0.1)
+    
+    row_idx = 1
+    if has_sensor:
+        for col, color, name in [('Tube_Dia_mm','#4fc3f7','Tube Dia (mm)'),
+                                   ('PPI_Pos','#81c784','Sensor PPI'),
+                                   ('Taper_Sensor','#ffb74d','Raw Sensor')]:
+            if col in process.columns:
+                gapped = process[['Timestamp', col]].dropna()
+                if not gapped.empty:
+                    gapped = gapped.set_index('Timestamp').resample('2s').mean().reset_index()
+                    fig6d.add_trace(go.Scatter(
+                        x=gapped['Timestamp'], y=gapped[col],
+                        mode='lines', name=name,
+                        line=dict(color=color, width=1.5), connectgaps=False
+                    ), row=row_idx, col=1)
+        add_wb_lines(fig6d, row=row_idx, col=1)
+        row_idx += 1
+
+    if has_motor:
+        motor = process[['Timestamp','I_Table_Motor_OL']].dropna()
+        if not motor.empty:
+            fig6d.add_trace(go.Scatter(
+                x=motor['Timestamp'], y=motor['I_Table_Motor_OL'].astype(int),
+                mode='lines', name='Motor OL',
+                line=dict(color='#ef5350', width=2), connectgaps=False,
+                fill='tozeroy', fillcolor='rgba(239,83,80,0.15)'
+            ), row=row_idx, col=1)
+            add_wb_lines(fig6d, row=row_idx, col=1)
+
+    fig6d.update_layout(height=400, title='Motor & Sensor Health',
+                        template='plotly_dark')
+    figs.append((fig6d, "Chart 6d — Motor & Sensor Health"))
+else:
+    print('Skipping chart 6d: motor/sensor tags not yet in process log.')
 
 
 # ── Chart 7 — OEE Summary ─────────────────────────────────────────────────────
