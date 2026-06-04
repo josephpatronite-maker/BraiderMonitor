@@ -198,6 +198,43 @@ def state_name(code):
     return STATE_CODES.get(code, f'UNKNOWN({code})')
 
 
+def archive_logs():
+    """
+    Archive log files on a schedule:
+    - process_log: weekly on Sunday midnight (gets large fast at 2s polling)
+    - event_log, oee_log, wire_break_log: monthly on 1st of month midnight
+    """
+    from datetime import datetime
+    now = datetime.now()
+
+    is_sunday_midnight   = (now.weekday() == 6 and now.hour == 0 and now.minute == 0)
+    is_monthstart_midnight = (now.day == 1 and now.hour == 0 and now.minute == 0)
+
+    archived_any = False
+
+    # Weekly — process_log only
+    if is_sunday_midnight:
+        week_label = now.strftime('%Y_%m_%d')
+        if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
+            archive_name = PROCESS_LOG.replace('.csv', f'_week_ending_{week_label}.csv')
+            os.rename(PROCESS_LOG, archive_name)
+            log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} -> {os.path.basename(archive_name)}')
+            archived_any = True
+
+    # Monthly — event, oee, wire_break logs
+    if is_monthstart_midnight:
+        month_label = now.strftime('%Y_%m')
+        for filepath in [EVENT_LOG, OEE_LOG, WIRE_BREAK_LOG]:
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                archive_name = filepath.replace('.csv', f'_{month_label}.csv')
+                os.rename(filepath, archive_name)
+                log.info(f'Monthly archive: {os.path.basename(filepath)} -> {os.path.basename(archive_name)}')
+                archived_any = True
+
+    if archived_any:
+        log.info('Archive complete')
+
+
 def write_csv_row(filepath, row: dict):
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
 
@@ -633,6 +670,9 @@ def monitor_loop():
                             'estop_recover':      d.get('EStop_Recover'),
                             'connected':          True,
                         })
+
+                    # Check for scheduled archives
+                    archive_logs()
 
                     time.sleep(FAST_POLL_INTERVAL)
 
