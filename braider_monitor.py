@@ -754,12 +754,7 @@ DASHBOARD_HTML = """
                 <span id="state-value">{{ d.state_name or '—' }}</span>
             </div>
             <div class="unit">
-                code {{ d.machine_state }}
-                {% if d.state_elapsed_s %}
-                  &nbsp;|&nbsp;
-                  {{ (d.state_elapsed_s // 3600)|int }}h
-                  {{ ((d.state_elapsed_s % 3600) // 60)|int }}m
-                {% endif %}
+                code {{ d.machine_state }} &nbsp;|&nbsp; <span id="elapsed-value">{% if d.state_elapsed_s %}{{ (d.state_elapsed_s // 3600)|int }}h {{ ((d.state_elapsed_s % 3600) // 60)|int }}m{% endif %}</span>
             </div>
         </div>
 
@@ -909,7 +904,7 @@ DASHBOARD_HTML = """
 // ── All dashboard JS in one block ─────────────────────────────────────────
 
 // Sound
-let soundEnabled = sessionStorage.getItem('soundEnabled') === 'true';
+let soundEnabled = localStorage.getItem('soundEnabled') === 'true';
 function toggleSound() {
     soundEnabled = !soundEnabled;
     localStorage.setItem('soundEnabled', soundEnabled);
@@ -1081,6 +1076,15 @@ async function fetchAndUpdate() {
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
         upd('wb-value',     wb !== null ? wb : '—');
+
+        // Update elapsed time in current state
+        const elapsed = data.state_elapsed_s;
+        const elapsedEl = document.getElementById('elapsed-value');
+        if (elapsedEl && elapsed) {
+            const h = Math.floor(elapsed / 3600);
+            const m = Math.floor((elapsed % 3600) / 60);
+            elapsedEl.textContent = h + 'h ' + m + 'm';
+        }
 
         // Update state card — text AND color class
         const stateEl = document.getElementById('state-value');
