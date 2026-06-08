@@ -613,12 +613,14 @@ if has_safety:
                 connectgaps=False
             ))
 
-    # Mark any safety events — when any flag goes False
+    # Mark transitions where any safety flag goes False (not every False row)
     safety_df = process[safety_cols].copy() if all(c in process.columns for c in safety_cols) else pd.DataFrame()
     if not safety_df.empty:
         any_false = (safety_df == False).any(axis=1)
-        false_times = process[any_false]['Timestamp']
-        for t in false_times:
+        # Only mark the moment it transitions from OK to NOT OK
+        transitions = any_false & ~any_false.shift(1).fillna(False)
+        false_times = process[transitions]['Timestamp']
+        for t in false_times[:20]:  # cap at 20 lines max
             fig6c2.add_vline(x=str(t), line_color='#ef5350',
                              line_dash='dot', line_width=1)
 
