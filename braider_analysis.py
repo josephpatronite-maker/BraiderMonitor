@@ -215,10 +215,8 @@ fig2.add_trace(go.Scatter(
     mode='markers', name='Anomaly (±3σ)',
     marker=dict(color='red', size=8, symbol='x')
 ))
-# No state shading on chart 2 — data is running-only, shading is redundant
-# Break the line across gaps so it doesn't connect across stopped periods
-# Insert NaN rows where machine was not running to create visual gaps
 ratio_gapped = ratio.copy().set_index('Timestamp').resample('2s').mean().reset_index()
+add_state_shading(fig2)
 add_wb_lines(fig2)
 fig2.add_hline(y=mean, line_color='white', line_dash='dot', line_width=1,
                annotation_text=f'mean={mean:.5f}')
@@ -397,6 +395,7 @@ for col, color in zip(axis_cols, colors):
             mode='lines', name=col,
             line=dict(color=color, width=1.5)
         ))
+add_state_shading(fig5)
 add_wb_lines(fig5)
 fig5.update_layout(
     height=400, title='Servo Axis Sync Flags (1=synced, 0=lost)',
