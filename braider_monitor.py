@@ -705,7 +705,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
     <title>Braider Monitor — Noble Gas Systems</title>
-    <!-- Live updates via JS fetch — no page reload needed -->
+    <meta http-equiv="refresh" content="10"><!-- fallback if JS fails -->
     <style>
         body  { font-family: monospace; background:#1a1a1a; color:#e0e0e0; padding:20px; margin:0; }
         h1    { color:#4fc3f7; margin-bottom:4px; }
@@ -894,7 +894,7 @@ DASHBOARD_HTML = """
     <!-- ── LIVE CHART ──────────────────────────────────────── -->
     <div class="section">Live — Last 60 Seconds</div>
     <div style="background:#2a2a2a; border-radius:8px; padding:14px; margin-bottom:12px;">
-        <canvas id="liveChart" height="120"></canvas>
+        <canvas id="liveChart" style="width:100%; height:120px; display:block;"></canvas>
     </div>
 
     <div class="conn" id="conn-bar">
@@ -976,7 +976,7 @@ const canvas = document.getElementById('liveChart');
 const ctx = canvas.getContext('2d');
 
 function drawChart() {
-    const W = canvas.width  = canvas.offsetWidth;
+    const W = canvas.width  = canvas.parentElement.clientWidth - 28;
     const H = canvas.height = 120;
     const PAD = { top: 10, right: 60, bottom: 30, left: 50 };
     const plotW = W - PAD.left - PAD.right;
