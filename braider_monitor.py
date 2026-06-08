@@ -897,7 +897,67 @@ DASHBOARD_HTML = """
         </span>
         &nbsp;|&nbsp; Logs: {{ log_dir }}
         &nbsp;|&nbsp; Braider_2
+        &nbsp;|&nbsp; <span id="sound-toggle" onclick="toggleSound()" style="cursor:pointer">🔔 Sound ON</span>
     </div>
+
+<script>
+// Sound alerts — plays on wire break or state change
+// State is stored in sessionStorage so it persists across the 3s auto-refresh
+let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
+
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    sessionStorage.setItem('soundEnabled', soundEnabled);
+    document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
+}
+
+document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
+
+function beep(freq, duration, volume) {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        gain.gain.value = volume || 0.3;
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        osc.start();
+        osc.stop(ctx.currentTime + duration / 1000);
+    } catch(e) {}
+}
+
+function alertWireBreak() {
+    // Three urgent beeps for wire break
+    beep(880, 200, 0.4);
+    setTimeout(() => beep(880, 200, 0.4), 300);
+    setTimeout(() => beep(880, 200, 0.4), 600);
+}
+
+function alertStateChange() {
+    // Single soft tone for state change
+    beep(440, 300, 0.2);
+}
+
+// Check current values against last known values
+const currentState = {{ d.machine_state or 0 }};
+const currentWBBits = {{ d.wire_break_bits if d.wire_break_bits is not none else 3 }};
+
+const lastState   = parseInt(sessionStorage.getItem('lastState') || currentState);
+const lastWBBits  = parseInt(sessionStorage.getItem('lastWBBits') || currentWBBits);
+
+if (soundEnabled) {
+    if (currentWBBits !== lastWBBits && currentWBBits !== 3 && currentState === 16) {
+        alertWireBreak();
+    } else if (currentState !== lastState) {
+        alertStateChange();
+    }
+}
+
+sessionStorage.setItem('lastState',  currentState);
+sessionStorage.setItem('lastWBBits', currentWBBits);
+</script>
 </body>
 </html>
 """
