@@ -324,6 +324,7 @@ def monitor_loop():
                     raise ConnectionError('LogixDriver connected=False')
 
                 log.info('Connected to PLC')
+                monitor_loop._retry_count = 0  # Reset backoff on successful connect
                 with _lock:
                     _latest['connected'] = True
                     _latest['last_error'] = None
@@ -669,12 +670,32 @@ def monitor_loop():
             log.info('Shutdown requested.')
             break
         except Exception as e:
-            log.error(f'Connection lost: {e}')
             with _lock:
                 _latest['connected'] = False
                 _latest['last_error'] = str(e)
-            log.info('Retrying in 10 seconds...')
-            time.sleep(10)
+
+            # Back off retry interval — short at first, longer after repeated failures
+            if not hasattr(monitor_loop, '_retry_count'):
+                monitor_loop._retry_count = 0
+            monitor_loop._retry_count += 1
+
+            if monitor_loop._retry_count <= 3:
+                # First 3 failures — retry every 10s (fast reconnect after brief outage)
+                wait = 10
+                log.error(f'Connection lost: {e}')
+                log.info(f'Retrying in {wait}s (attempt {monitor_loop._retry_count})...')
+            elif monitor_loop._retry_count <= 10:
+                # Next 7 failures — retry every 60s
+                wait = 60
+                if monitor_loop._retry_count == 4:
+                    log.warning('PLC unreachable — switching to 60s retry interval')
+            else:
+                # After 10 failures — retry every 5 minutes, log once per hour
+                wait = 300
+                if monitor_loop._retry_count % 12 == 0:
+                    log.warning(f'PLC still unreachable after {monitor_loop._retry_count} attempts — retrying every 5min')
+
+            time.sleep(wait)
 
 
 # ── Flask dashboard ───────────────────────────────────────────────────────────
@@ -694,7 +715,7 @@ DASHBOARD_HTML = """
         .label{ font-size:10px; color:#888; text-transform:uppercase; letter-spacing:1px; }
         .value{ font-size:26px; font-weight:bold; margin-top:4px; line-height:1.1; }
         .unit { font-size:12px; color:#888; margin-top:2px; }
-        .section { font-size:11px; color:#555; text-transform:uppercase; 
+        .section { font-size:11px; color:#555; text-transform:uppercase;
                    letter-spacing:2px; margin:20px 0 8px; }
         .running { color:#66bb6a; }
         .stopped { color:#ef5350; }
@@ -705,20 +726,22 @@ DASHBOARD_HTML = """
         .blink   { animation:blink 1s step-start infinite; }
         @keyframes blink { 50%{opacity:0} }
         .conn { font-size:12px; margin-top:20px; color:#888; }
-        .axes { display:flex; gap:8px; margin-top:6px; }
+        .axes { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
         .axis { padding:3px 8px; border-radius:4px; font-size:12px; font-weight:bold; }
         .axis-ok   { background:#1b5e20; color:#66bb6a; }
         .axis-warn { background:#b71c1c; color:#ef9a9a; }
+        .checks { font-size:14px; line-height:2; }
     </style>
 </head>
 <body>
     <h1>Braider Monitor — {{ braider_id }}</h1>
     <div class="sub">
-        Noble Gas Systems — Steeger HS120/48 &nbsp;|&nbsp; 
-        PLC {{ plc_ip }} &nbsp;|&nbsp; 
+        Noble Gas Systems — Steeger HS120/48 &nbsp;|&nbsp;
+        PLC {{ plc_ip }} &nbsp;|&nbsp;
         Updated: {{ d.timestamp }}
     </div>
 
+    <!-- ── MACHINE ─────────────────────────────────────────── -->
     <div class="section">Machine</div>
     <div class="grid">
 
@@ -733,8 +756,8 @@ DASHBOARD_HTML = """
             <div class="unit">
                 code {{ d.machine_state }}
                 {% if d.state_elapsed_s %}
-                  &nbsp;|&nbsp; 
-                  {{ (d.state_elapsed_s // 3600)|int }}h 
+                  &nbsp;|&nbsp;
+                  {{ (d.state_elapsed_s // 3600)|int }}h
                   {{ ((d.state_elapsed_s % 3600) // 60)|int }}m
                 {% endif %}
             </div>
@@ -742,42 +765,33 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Recipe</div>
-            <div class="value" style="font-size:20px">{{ d.recipe_name or '—' }}</div>
+            <div class="value" style="font-size:22px">{{ d.recipe_name or '—' }}</div>
             <div class="unit">
-                {{ d.recipe_ppi }} PPI setpoint
+                {{ d.recipe_ppi }} PPI
                 {% if d.recipe_modified %}&nbsp;<span class="warn">modified</span>{% endif %}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Job</div>
-            <div class="value" style="font-size:20px">
-                {{ d.discrete_distance or '—' }} ft
-            </div>
-            <div class="unit">
-                {{ d.discrete_loops or '—' }} loops
                 {% if d.mandrel_mode %}&nbsp;| mandrel{% endif %}
             </div>
         </div>
 
         <div class="card">
-            <div class="label">Production This Session</div>
+            <div class="label">Production — This Session</div>
             <div class="value">{{ d.puller_pos_feet or '—' }}</div>
-            <div class="unit">feet &nbsp;|&nbsp; seg {{ d.active_segment }}</div>
+            <div class="unit">
+                feet
+                {% if d.run_complete %}&nbsp;<span class="ok">✓ RUN COMPLETE</span>{% endif %}
+            </div>
         </div>
 
     </div>
 
+    <!-- ── PROCESS ─────────────────────────────────────────── -->
     <div class="section">Process</div>
     <div class="grid">
 
         <div class="card">
             <div class="label">Table Speed</div>
             <div class="value">{{ d.table_speed or '—' }}</div>
-            <div class="unit">
-                rev/s
-                {% if d.horn_gear_rpm %}&nbsp;|&nbsp; {{ d.horn_gear_rpm }} RPM{% endif %}
-            </div>
+            <div class="unit">rev/s</div>
         </div>
 
         <div class="card">
@@ -791,43 +805,33 @@ DASHBOARD_HTML = """
             <div class="value" style="font-size:20px">
                 {% if d.speed_ratio %}{{ "%.5f"|format(d.speed_ratio) }}{% else %}—{% endif %}
             </div>
-            <div class="unit">
-                puller ÷ table
-                {% if d.transition_active %}&nbsp;<span class="warn">TRANSITIONING</span>{% endif %}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Segment Speed</div>
-            <div class="value" style="font-size:20px">{{ d.active_seg_speed or '—' }}</div>
-            <div class="unit">target rev/s for current segment</div>
+            <div class="unit">puller ÷ table</div>
         </div>
 
         <div class="card">
             <div class="label">Taper Sensor</div>
-            <div class="value" style="font-size:20px">
-                {% if d.tube_dia_mm %}{{ d.tube_dia_mm }} mm{% elif d.ppi_pos %}{{ d.ppi_pos }} PPI{% else %}—{% endif %}
+            <div class="value" style="font-size:22px">
+                {% if d.taper_sensor %}{{ "%.2f"|format(d.taper_sensor) }}{% else %}—{% endif %}
             </div>
-            <div class="unit">
-                {% if d.taper_sensor %}raw: {{ d.taper_sensor }}{% endif %}
-            </div>
+            <div class="unit">raw units — units TBD</div>
         </div>
 
         <div class="card">
-            <div class="label">Job Progress</div>
-            <div class="value" style="font-size:20px">
-                {% if d.length_to_run %}{{ d.length_to_run }} ft left{% else %}—{% endif %}
+            <div class="label">VFD — Actual / Command</div>
+            <div class="value" style="font-size:18px">
+                {{ d.vfd_freq_actual or '—' }} / {{ d.vfd_freq_command or '—' }}
             </div>
             <div class="unit">
-                Loop {{ d.loop_count or '—' }}
-                {% if d.run_complete %}&nbsp;<span class="ok">✓ RUN COMPLETE</span>{% endif %}
-                {% if d.new_part %}&nbsp;<span class="ok">NEW PART</span>{% endif %}
+                Hz×10 &nbsp;|&nbsp; delta: {{ d.vfd_freq_delta or 0 }}
+                {% if d.vfd_at_ref %}&nbsp;<span class="ok">AT REF</span>{% endif %}
+                {% if d.vfd_faulted %}&nbsp;<span class="fault blink">VFD FAULT</span>{% endif %}
             </div>
         </div>
 
     </div>
 
-    <div class="section">Wire Breaks &amp; Faults</div>
+    <!-- ── FAULTS & SAFETY ────────────────────────────────── -->
+    <div class="section">Faults &amp; Safety</div>
     <div class="grid">
 
         <div class="card">
@@ -835,15 +839,34 @@ DASHBOARD_HTML = """
             <div class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
                 {{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}
             </div>
+            <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = 3</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Faults</div>
+            <div class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
+                {% if d.no_faults %}NONE{% else %}FAULT{% endif %}
+            </div>
             <div class="unit">
-                Local:1:I.Data &nbsp;|&nbsp; normal = 3
-                {% if d.wire_break_detected %}&nbsp;<span class="fault blink">WB DETECTED</span>{% endif %}
+                {% if d.machine_faults and d.machine_faults != 4 %}code: {{ d.machine_faults }}{% endif %}
             </div>
         </div>
 
         <div class="card">
-            <div class="label">Triaxial / Core</div>
-            <div class="value" style="font-size:14px; line-height:1.8">
+            <div class="label">Safety</div>
+            <div class="checks">
+                <span class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
+                    {{ '✓' if d.estop_ok else '✗' }} E-Stop
+                </span><br>
+                <span class="{{ 'ok' if d.door_ok else 'warn' }}">
+                    {{ '✓' if d.door_ok else '✗' }} Door
+                </span><br>
+                <span class="{{ 'ok' if d.guards_ok else 'fault' }}">
+                    {{ '✓' if d.guards_ok else '✗' }} Guards
+                </span><br>
+                <span class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
+                    {{ '✗ MOTOR OL' if d.i_table_motor_ol else '✓ Motor OK' }}
+                </span><br>
                 <span class="{{ 'fault blink' if d.i_triaxial_wb else 'ok' }}">
                     {{ '✗ TRIAXIAL WB' if d.i_triaxial_wb else '✓ Triaxial OK' }}
                 </span><br>
@@ -854,97 +877,16 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Faults</div>
-            <div class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
-                {% if d.no_faults %}NONE{% else %}FAULT{% endif %}
-            </div>
-            <div class="unit">
-                {% if d.machine_faults %}code: {{ d.machine_faults }}{% endif %}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Safety Inputs</div>
-            <div class="value" style="font-size:14px; line-height:1.8">
-                <span class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
-                    {{ '✓' if d.estop_ok else '✗' }} E-Stop
-                </span><br>
-                <span class="{{ 'ok' if d.door_ok else 'fault' }}">
-                    {{ '✓' if d.door_ok else '✗' }} Door
-                </span><br>
-                <span class="{{ 'ok' if d.guards_ok else 'fault' }}">
-                    {{ '✓' if d.guards_ok else '✗' }} Guards
-                </span><br>
-                <span class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
-                    {{ '✗ MOTOR OL' if d.i_table_motor_ol else '✓ Motor OK' }}
-                </span>
-            </div>
-        </div>
-
-        <div class="card">
             <div class="label">Servo Axis Sync</div>
-            <div class="axes" style="flex-wrap:wrap; margin-top:8px;">
+            <div class="axes">
                 {% for i, synced in [
                     (1, d.axis1_synced), (2, d.axis2_synced), (3, d.axis3_synced),
                     (4, d.axis4_synced), (5, d.axis5_synced)
                 ] %}
-                <span class="axis {{ 'axis-ok' if synced else 'axis-warn' }}">
-                    OS{{ i }}
-                </span>
+                <span class="axis {{ 'axis-ok' if synced else 'axis-warn' }}">OS{{ i }}</span>
                 {% endfor %}
             </div>
-            <div class="unit" style="margin-top:6px">
-                all green = normal
-                {% if d.estop_recover %}&nbsp;<span class="warn">ESTOP RECOVER</span>{% endif %}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">VFD Freq — Actual / Command</div>
-            <div class="value" style="font-size:18px">
-                {{ d.vfd_freq_actual or '—' }} / {{ d.vfd_freq_command or '—' }}
-            </div>
-            <div class="unit">
-                delta: {{ d.vfd_freq_delta or '—' }}
-                {% if d.vfd_at_ref %}&nbsp;<span class="ok">AT REF</span>{% endif %}
-                {% if d.vfd_faulted %}&nbsp;<span class="fault blink">VFD FAULT</span>{% endif %}
-            </div>
-        </div>
-
-    </div>
-
-    <div class="section">OEE — Lifetime</div>
-    <div class="grid">
-
-        <div class="card">
-            <div class="label">Running</div>
-            <div class="value running">{{ d.cum_running_hrs or '—' }}</div>
-            <div class="unit">hours cumulative</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Stopped</div>
-            <div class="value stopped">{{ d.cum_stopped_hrs or '—' }}</div>
-            <div class="unit">hours cumulative</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Ready / Idle</div>
-            <div class="value paused">{{ d.cum_ready_hrs or '—' }}</div>
-            <div class="unit">hours cumulative</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Availability</div>
-            <div class="value" style="font-size:22px">
-                {% if d.cum_running_hrs and d.cum_stopped_hrs and d.cum_ready_hrs %}
-                    {% set total = d.cum_running_hrs + d.cum_stopped_hrs + d.cum_ready_hrs %}
-                    {% if total > 0 %}
-                        {{ "%.1f"|format(100 * d.cum_running_hrs / total) }}%
-                    {% else %}—{% endif %}
-                {% else %}—{% endif %}
-            </div>
-            <div class="unit">running ÷ (running+stopped+ready)</div>
+            <div class="unit" style="margin-top:8px">all green = normal</div>
         </div>
 
     </div>
@@ -954,6 +896,7 @@ DASHBOARD_HTML = """
             {% if d.connected %}CONNECTED{% else %}DISCONNECTED — {{ d.last_error }}{% endif %}
         </span>
         &nbsp;|&nbsp; Logs: {{ log_dir }}
+        &nbsp;|&nbsp; Braider_2
     </div>
 </body>
 </html>
