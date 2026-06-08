@@ -906,74 +906,43 @@ DASHBOARD_HTML = """
     </div>
 
 <script>
-// Sound alerts — plays on wire break or state change
-// State is stored in sessionStorage so it persists across the 3s auto-refresh
-let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
+// ── All dashboard JS in one block ─────────────────────────────────────────
 
+// Sound
+let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
 function toggleSound() {
     soundEnabled = !soundEnabled;
     sessionStorage.setItem('soundEnabled', soundEnabled);
     document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
 }
-
 document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
 
 function beep(freq, duration, volume) {
     try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
         gain.gain.value = volume || 0.3;
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-        osc.start();
-        osc.stop(ctx.currentTime + duration / 1000);
+        osc.frequency.value = freq; osc.type = 'sine';
+        osc.start(); osc.stop(audioCtx.currentTime + duration / 1000);
     } catch(e) {}
 }
-
 function alertWireBreak() {
-    // Three urgent beeps for wire break
-    beep(880, 200, 0.4);
-    setTimeout(() => beep(880, 200, 0.4), 300);
-    setTimeout(() => beep(880, 200, 0.4), 600);
+    beep(880, 200, 0.4); setTimeout(() => beep(880, 200, 0.4), 300); setTimeout(() => beep(880, 200, 0.4), 600);
 }
+function alertStateChange() { beep(440, 300, 0.2); }
 
-function alertStateChange() {
-    // Single soft tone for state change
-    beep(440, 300, 0.2);
-}
-
-// Check current values against last known values
-const currentState = {{ d.machine_state or 0 }};
-const currentWBBits = {{ d.wire_break_bits if d.wire_break_bits is not none else 3 }};
-
-const lastState   = parseInt(sessionStorage.getItem('lastState') || currentState);
-const lastWBBits  = parseInt(sessionStorage.getItem('lastWBBits') || currentWBBits);
-
-if (soundEnabled) {
-    if (currentWBBits !== lastWBBits && currentWBBits !== 3 && currentState === 16) {
-        alertWireBreak();
-    } else if (currentState !== lastState) {
-        alertStateChange();
-    }
-}
-
-sessionStorage.setItem('lastState',  currentState);
-sessionStorage.setItem('lastWBBits', currentWBBits);
-</script>
-<script>
-// ── Live chart — plain canvas, no external libraries ─────────────────────
+// ── Live chart — plain canvas ─────────────────────────────────────────────
 const MAX_POINTS = 30;
-const tableSpeed  = Array(MAX_POINTS).fill(null);
-const pullerSpeed = Array(MAX_POINTS).fill(null);
-const speedRatio  = Array(MAX_POINTS).fill(null);
-const timestamps  = Array(MAX_POINTS).fill('');
+const tableSpeed    = Array(MAX_POINTS).fill(null);
+const pullerSpeed   = Array(MAX_POINTS).fill(null);
+const speedRatio    = Array(MAX_POINTS).fill(null);
+const timestamps    = Array(MAX_POINTS).fill('');
 const machineStates = Array(MAX_POINTS).fill(0);
 
 const canvas = document.getElementById('liveChart');
-const ctx = canvas.getContext('2d');
+const canvasCtx = canvas.getContext('2d');
 
 function drawChart() {
     const W = canvas.width  = canvas.parentElement.clientWidth - 28;
@@ -982,25 +951,21 @@ function drawChart() {
     const plotW = W - PAD.left - PAD.right;
     const plotH = H - PAD.top - PAD.bottom;
 
-    ctx.clearRect(0, 0, W, H);
+    canvasCtx.clearRect(0, 0, W, H);
 
-    // Background by machine state
     for (let i = 0; i < MAX_POINTS - 1; i++) {
         const x0 = PAD.left + (i / (MAX_POINTS-1)) * plotW;
         const x1 = PAD.left + ((i+1) / (MAX_POINTS-1)) * plotW;
-        ctx.fillStyle = machineStates[i] === 16 ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.08)';
-        ctx.fillRect(x0, PAD.top, x1-x0, plotH);
+        canvasCtx.fillStyle = machineStates[i] === 16 ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.08)';
+        canvasCtx.fillRect(x0, PAD.top, x1-x0, plotH);
     }
 
-    // Grid lines
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 0.5;
+    canvasCtx.strokeStyle = '#333'; canvasCtx.lineWidth = 0.5;
     for (let i = 0; i <= 4; i++) {
         const y = PAD.top + (i/4) * plotH;
-        ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + plotW, y); ctx.stroke();
+        canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left, y); canvasCtx.lineTo(PAD.left + plotW, y); canvasCtx.stroke();
     }
 
-    // Helper to get non-null values range
     function range(arr) {
         const vals = arr.filter(v => v !== null);
         if (!vals.length) return [0, 1];
@@ -1008,94 +973,73 @@ function drawChart() {
         const pad = (mx - mn) * 0.1 || 0.1;
         return [mn - pad, mx + pad];
     }
-
-    function toY(v, mn, mx) {
-        return PAD.top + plotH - ((v - mn) / (mx - mn)) * plotH;
-    }
-
+    function toY(v, mn, mx) { return PAD.top + plotH - ((v - mn) / (mx - mn)) * plotH; }
     function drawLine(data, color, mn, mx) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
+        canvasCtx.strokeStyle = color; canvasCtx.lineWidth = 1.5; canvasCtx.lineJoin = 'round';
+        canvasCtx.beginPath();
         let started = false;
         for (let i = 0; i < MAX_POINTS; i++) {
             if (data[i] === null) { started = false; continue; }
             const x = PAD.left + (i / (MAX_POINTS-1)) * plotW;
             const y = toY(data[i], mn, mx);
-            if (!started) { ctx.moveTo(x, y); started = true; }
-            else ctx.lineTo(x, y);
+            if (!started) { canvasCtx.moveTo(x, y); started = true; } else canvasCtx.lineTo(x, y);
         }
-        ctx.stroke();
+        canvasCtx.stroke();
     }
 
-    // Speed axis (left) — table + puller
     const [spMn, spMx] = range([...tableSpeed, ...pullerSpeed]);
     drawLine(tableSpeed,  '#4fc3f7', spMn, spMx);
     drawLine(pullerSpeed, '#81c784', spMn, spMx);
-
-    // Ratio axis (right)
     const [rMn, rMx] = range(speedRatio);
     drawLine(speedRatio, '#ffb74d', rMn, rMx);
 
-    // Y axis labels — left
-    ctx.fillStyle = '#888'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
-    ctx.fillText(spMx.toFixed(2), PAD.left - 4, PAD.top + 10);
-    ctx.fillText(spMn.toFixed(2), PAD.left - 4, PAD.top + plotH);
+    canvasCtx.fillStyle = '#888'; canvasCtx.font = '10px monospace'; canvasCtx.textAlign = 'right';
+    canvasCtx.fillText(spMx.toFixed(2), PAD.left - 4, PAD.top + 10);
+    canvasCtx.fillText(spMn.toFixed(2), PAD.left - 4, PAD.top + plotH);
+    canvasCtx.fillStyle = '#ffb74d'; canvasCtx.textAlign = 'left';
+    canvasCtx.fillText(rMx.toFixed(4), PAD.left + plotW + 4, PAD.top + 10);
+    canvasCtx.fillText(rMn.toFixed(4), PAD.left + plotW + 4, PAD.top + plotH);
+    canvasCtx.fillStyle = '#555'; canvasCtx.textAlign = 'center'; canvasCtx.font = '10px monospace';
+    if (timestamps[0])            canvasCtx.fillText(timestamps[0],            PAD.left,         PAD.top + plotH + 18);
+    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1], PAD.left + plotW, PAD.top + plotH + 18);
 
-    // Y axis labels — right (ratio)
-    ctx.fillStyle = '#ffb74d'; ctx.textAlign = 'left';
-    ctx.fillText(rMx.toFixed(4), PAD.left + plotW + 4, PAD.top + 10);
-    ctx.fillText(rMn.toFixed(4), PAD.left + plotW + 4, PAD.top + plotH);
-
-    // X axis timestamps — show first and last
-    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.font = '10px monospace';
-    if (timestamps[0])                ctx.fillText(timestamps[0],            PAD.left,         PAD.top + plotH + 18);
-    if (timestamps[MAX_POINTS-1])     ctx.fillText(timestamps[MAX_POINTS-1], PAD.left + plotW, PAD.top + plotH + 18);
-
-    // Legend
-    ctx.textAlign = 'left'; ctx.font = '10px monospace';
+    canvasCtx.textAlign = 'left'; canvasCtx.font = '10px monospace';
     const legY = PAD.top + 12;
-    ctx.fillStyle = '#4fc3f7'; ctx.fillRect(PAD.left + 4, legY - 6, 12, 2);
-    ctx.fillText('Table', PAD.left + 20, legY);
-    ctx.fillStyle = '#81c784'; ctx.fillRect(PAD.left + 70, legY - 6, 12, 2);
-    ctx.fillText('Puller', PAD.left + 86, legY);
-    ctx.fillStyle = '#ffb74d'; ctx.fillRect(PAD.left + 144, legY - 6, 12, 2);
-    ctx.fillText('Ratio →', PAD.left + 160, legY);
+    canvasCtx.fillStyle = '#4fc3f7'; canvasCtx.fillRect(PAD.left + 4, legY - 6, 12, 2);
+    canvasCtx.fillText('Table', PAD.left + 20, legY);
+    canvasCtx.fillStyle = '#81c784'; canvasCtx.fillRect(PAD.left + 70, legY - 6, 12, 2);
+    canvasCtx.fillText('Puller', PAD.left + 86, legY);
+    canvasCtx.fillStyle = '#ffb74d'; canvasCtx.fillRect(PAD.left + 144, legY - 6, 12, 2);
+    canvasCtx.fillText('Ratio →', PAD.left + 160, legY);
 }
 
 // ── Fetch loop ────────────────────────────────────────────────────────────
 let lastState  = null;
 let lastWBBits = null;
-let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
 
 async function fetchAndUpdate() {
     try {
         const res  = await fetch('/api/latest');
         const data = await res.json();
+        const now  = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const ts   = data.table_speed  || 0;
+        const ps   = data.puller_speed || 0;
+        const sr   = data.speed_ratio  || null;
+        const wb   = data.wire_break_bits;
+        const st   = data.machine_state;
 
-        const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const ts  = data.table_speed  || 0;
-        const ps  = data.puller_speed || 0;
-        const sr  = data.speed_ratio  || null;
-        const wb  = data.wire_break_bits;
-        const st  = data.machine_state;
-
-        // Shift rolling buffers
-        tableSpeed.shift();   tableSpeed.push(ts);
-        pullerSpeed.shift();  pullerSpeed.push(ps);
-        speedRatio.shift();   speedRatio.push(sr);
-        timestamps.shift();   timestamps.push(now);
-        machineStates.shift();machineStates.push(st || 0);
+        tableSpeed.shift();    tableSpeed.push(ts);
+        pullerSpeed.shift();   pullerSpeed.push(ps);
+        speedRatio.shift();    speedRatio.push(sr);
+        timestamps.shift();    timestamps.push(now);
+        machineStates.shift(); machineStates.push(st || 0);
 
         drawChart();
 
-        // Update status bar
         document.getElementById('conn-status').textContent = data.connected ? 'CONNECTED' : 'DISCONNECTED — ' + (data.last_error || '');
         document.getElementById('conn-status').className   = data.connected ? 'ok' : 'fault';
         document.getElementById('last-update').textContent = 'updated ' + now;
 
-        // Update cards
         const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = v; };
         upd('state-value',  data.state_name || '—');
         upd('feet-value',   data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
@@ -1105,21 +1049,17 @@ async function fetchAndUpdate() {
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
         upd('wb-value',     wb !== null ? wb : '—');
 
-        // Sound
         if (soundEnabled) {
             if (wb !== lastWBBits && wb !== 3 && st === 16) alertWireBreak();
             else if (st !== lastState && lastState !== null) alertStateChange();
         }
-        lastState  = st;
-        lastWBBits = wb;
+        lastState  = st; lastWBBits = wb;
 
     } catch(e) {
-        document.getElementById('conn-status').textContent = 'DISCONNECTED';
-        document.getElementById('conn-status').className   = 'fault';
+        const cs = document.getElementById('conn-status');
+        if (cs) { cs.textContent = 'DISCONNECTED'; cs.className = 'fault'; }
     }
 }
-
-function updateCard(id, val) { const e = document.getElementById(id); if(e) e.textContent = val; }
 
 window.addEventListener('resize', drawChart);
 setInterval(fetchAndUpdate, 2000);
