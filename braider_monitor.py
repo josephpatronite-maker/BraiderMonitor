@@ -892,9 +892,9 @@ DASHBOARD_HTML = """
     </div>
 
     <!-- ── LIVE CHART ──────────────────────────────────────── -->
-    <div class="section">Live — Last 60 Seconds</div>
+    <div class="section">Live — Last 2.5 Minutes</div>
     <div style="background:#2a2a2a; border-radius:8px; padding:14px; margin-bottom:12px;">
-        <canvas id="liveChart" style="width:100%; height:120px; display:block;"></canvas>
+        <canvas id="liveChart" style="width:100%; height:300px; display:block;"></canvas>
     </div>
 
     <div class="conn" id="conn-bar">
@@ -934,7 +934,7 @@ function alertWireBreak() {
 function alertStateChange() { beep(440, 300, 0.2); }
 
 // ── Live chart — plain canvas ─────────────────────────────────────────────
-const MAX_POINTS = 30;
+const MAX_POINTS = 75;  // 75 × 2s = 2.5 minutes
 const tableSpeed    = Array(MAX_POINTS).fill(null);
 const pullerSpeed   = Array(MAX_POINTS).fill(null);
 const speedRatio    = Array(MAX_POINTS).fill(null);
@@ -946,71 +946,105 @@ const canvasCtx = canvas.getContext('2d');
 
 function drawChart() {
     const W = canvas.width  = canvas.parentElement.clientWidth - 28;
-    const H = canvas.height = 120;
-    const PAD = { top: 10, right: 60, bottom: 30, left: 50 };
-    const plotW = W - PAD.left - PAD.right;
-    const plotH = H - PAD.top - PAD.bottom;
+    const H = canvas.height = 300;
+    const PAD   = { top: 8, right: 10, bottom: 22, left: 52 };
+    const GAP   = 8;
+    const PANELS = 3;
+    const plotW  = W - PAD.left - PAD.right;
+    const panelH = (H - PAD.top - PAD.bottom - GAP * (PANELS-1)) / PANELS;
 
     canvasCtx.clearRect(0, 0, W, H);
 
-    for (let i = 0; i < MAX_POINTS - 1; i++) {
-        const x0 = PAD.left + (i / (MAX_POINTS-1)) * plotW;
-        const x1 = PAD.left + ((i+1) / (MAX_POINTS-1)) * plotW;
-        canvasCtx.fillStyle = machineStates[i] === 16 ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.08)';
-        canvasCtx.fillRect(x0, PAD.top, x1-x0, plotH);
-    }
+    const panelTop = p => PAD.top + p * (panelH + GAP);
 
-    canvasCtx.strokeStyle = '#333'; canvasCtx.lineWidth = 0.5;
-    for (let i = 0; i <= 4; i++) {
-        const y = PAD.top + (i/4) * plotH;
-        canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left, y); canvasCtx.lineTo(PAD.left + plotW, y); canvasCtx.stroke();
+    function drawBackground(p) {
+        for (let i = 0; i < MAX_POINTS - 1; i++) {
+            const x0 = PAD.left + (i / (MAX_POINTS-1)) * plotW;
+            const x1 = PAD.left + ((i+1) / (MAX_POINTS-1)) * plotW;
+            canvasCtx.fillStyle = machineStates[i] === 16
+                ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.08)';
+            canvasCtx.fillRect(x0, panelTop(p), x1-x0, panelH);
+        }
+        canvasCtx.strokeStyle = '#333'; canvasCtx.lineWidth = 0.5;
+        for (let i = 0; i <= 3; i++) {
+            const y = panelTop(p) + (i/3) * panelH;
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(PAD.left, y);
+            canvasCtx.lineTo(PAD.left + plotW, y);
+            canvasCtx.stroke();
+        }
     }
 
     function range(arr) {
-        const vals = arr.filter(v => v !== null);
+        const vals = arr.filter(v => v !== null && isFinite(v));
         if (!vals.length) return [0, 1];
         const mn = Math.min(...vals), mx = Math.max(...vals);
-        const pad = (mx - mn) * 0.1 || 0.1;
+        const pad = (mx - mn) * 0.15 || 0.05;
         return [mn - pad, mx + pad];
     }
-    function toY(v, mn, mx) { return PAD.top + plotH - ((v - mn) / (mx - mn)) * plotH; }
-    function drawLine(data, color, mn, mx) {
-        canvasCtx.strokeStyle = color; canvasCtx.lineWidth = 1.5; canvasCtx.lineJoin = 'round';
+
+    function drawLine(p, data, color, mn, mx) {
+        canvasCtx.strokeStyle = color;
+        canvasCtx.lineWidth = 1.5;
+        canvasCtx.lineJoin = 'round';
         canvasCtx.beginPath();
         let started = false;
+        const top = panelTop(p);
         for (let i = 0; i < MAX_POINTS; i++) {
-            if (data[i] === null) { started = false; continue; }
+            if (data[i] === null || !isFinite(data[i])) { started = false; continue; }
             const x = PAD.left + (i / (MAX_POINTS-1)) * plotW;
-            const y = toY(data[i], mn, mx);
-            if (!started) { canvasCtx.moveTo(x, y); started = true; } else canvasCtx.lineTo(x, y);
+            const y = top + panelH - ((data[i] - mn) / (mx - mn)) * panelH;
+            if (!started) { canvasCtx.moveTo(x, y); started = true; }
+            else canvasCtx.lineTo(x, y);
         }
         canvasCtx.stroke();
     }
 
-    const [spMn, spMx] = range([...tableSpeed, ...pullerSpeed]);
-    drawLine(tableSpeed,  '#4fc3f7', spMn, spMx);
-    drawLine(pullerSpeed, '#81c784', spMn, spMx);
+    function labelY(p, mn, mx, color) {
+        canvasCtx.fillStyle = color;
+        canvasCtx.font = '9px monospace';
+        canvasCtx.textAlign = 'right';
+        canvasCtx.fillText(mx.toFixed(3), PAD.left - 3, panelTop(p) + 9);
+        canvasCtx.fillText(mn.toFixed(3), PAD.left - 3, panelTop(p) + panelH - 2);
+    }
+
+    function labelPanel(p, text, color) {
+        canvasCtx.fillStyle = color;
+        canvasCtx.font = 'bold 10px monospace';
+        canvasCtx.textAlign = 'left';
+        canvasCtx.fillText(text, PAD.left + 4, panelTop(p) + 11);
+    }
+
+    // Panel 0 — Table Speed
+    const [tMn, tMx] = range(tableSpeed);
+    drawBackground(0);
+    drawLine(0, tableSpeed, '#4fc3f7', tMn, tMx);
+    labelY(0, tMn, tMx, '#4fc3f7');
+    labelPanel(0, 'Table Speed (rev/s)', '#4fc3f7');
+
+    // Panel 1 — Puller Speed
+    const [pMn, pMx] = range(pullerSpeed);
+    drawBackground(1);
+    drawLine(1, pullerSpeed, '#81c784', pMn, pMx);
+    labelY(1, pMn, pMx, '#81c784');
+    labelPanel(1, 'Puller Speed (in/s)', '#81c784');
+
+    // Panel 2 — Speed Ratio
     const [rMn, rMx] = range(speedRatio);
-    drawLine(speedRatio, '#ffb74d', rMn, rMx);
+    drawBackground(2);
+    drawLine(2, speedRatio, '#ffb74d', rMn, rMx);
+    labelY(2, rMn, rMx, '#ffb74d');
+    labelPanel(2, 'Speed Ratio', '#ffb74d');
 
-    canvasCtx.fillStyle = '#888'; canvasCtx.font = '10px monospace'; canvasCtx.textAlign = 'right';
-    canvasCtx.fillText(spMx.toFixed(2), PAD.left - 4, PAD.top + 10);
-    canvasCtx.fillText(spMn.toFixed(2), PAD.left - 4, PAD.top + plotH);
-    canvasCtx.fillStyle = '#ffb74d'; canvasCtx.textAlign = 'left';
-    canvasCtx.fillText(rMx.toFixed(4), PAD.left + plotW + 4, PAD.top + 10);
-    canvasCtx.fillText(rMn.toFixed(4), PAD.left + plotW + 4, PAD.top + plotH);
-    canvasCtx.fillStyle = '#555'; canvasCtx.textAlign = 'center'; canvasCtx.font = '10px monospace';
-    if (timestamps[0])            canvasCtx.fillText(timestamps[0],            PAD.left,         PAD.top + plotH + 18);
-    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1], PAD.left + plotW, PAD.top + plotH + 18);
-
-    canvasCtx.textAlign = 'left'; canvasCtx.font = '10px monospace';
-    const legY = PAD.top + 12;
-    canvasCtx.fillStyle = '#4fc3f7'; canvasCtx.fillRect(PAD.left + 4, legY - 6, 12, 2);
-    canvasCtx.fillText('Table', PAD.left + 20, legY);
-    canvasCtx.fillStyle = '#81c784'; canvasCtx.fillRect(PAD.left + 70, legY - 6, 12, 2);
-    canvasCtx.fillText('Puller', PAD.left + 86, legY);
-    canvasCtx.fillStyle = '#ffb74d'; canvasCtx.fillRect(PAD.left + 144, legY - 6, 12, 2);
-    canvasCtx.fillText('Ratio →', PAD.left + 160, legY);
+    // X axis timestamps
+    canvasCtx.fillStyle = '#555';
+    canvasCtx.font = '9px monospace';
+    canvasCtx.textAlign = 'center';
+    const xBottom = panelTop(2) + panelH + 14;
+    if (timestamps[0])            canvasCtx.fillText(timestamps[0],            PAD.left,         xBottom);
+    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1], PAD.left + plotW, xBottom);
+    const mid = Math.floor(MAX_POINTS/2);
+    if (timestamps[mid]) canvasCtx.fillText(timestamps[mid], PAD.left + plotW/2, xBottom);
 }
 
 // ── Fetch loop ────────────────────────────────────────────────────────────
