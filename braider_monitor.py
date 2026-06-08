@@ -747,7 +747,7 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">State</div>
-            <div class="value {% if d.machine_state == 16 %}running
+            <div id="state-div" class="value {% if d.machine_state == 16 %}running
                               {% elif d.machine_state in (256,512) %}fault blink
                               {% elif d.machine_state in (64,128) %}paused
                               {% else %}stopped{% endif %}">
@@ -836,7 +836,7 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Wire Break Inputs</div>
-            <div class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
+            <div id="wb-div" class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
                 <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
             </div>
             <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = 3</div>
@@ -844,10 +844,10 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Faults</div>
-            <div class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
+            <div id="fault-div" class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
                 {% if d.no_faults %}NONE{% else %}FAULT{% endif %}
             </div>
-            <div class="unit">
+            <div id="fault-unit" class="unit">
                 {% if d.machine_faults and d.machine_faults != 4 %}code: {{ d.machine_faults }}{% endif %}
             </div>
         </div>
@@ -1075,13 +1075,46 @@ async function fetchAndUpdate() {
         document.getElementById('last-update').textContent = 'updated ' + now;
 
         const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = v; };
-        upd('state-value',  data.state_name || '—');
         upd('feet-value',   data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
         upd('table-value',  ts ? ts.toFixed(4) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
         upd('wb-value',     wb !== null ? wb : '—');
+
+        // Update state card — text AND color class
+        const stateEl = document.getElementById('state-value');
+        if (stateEl) {
+            stateEl.textContent = data.state_name || '—';
+            const stateDiv = document.getElementById('state-div');
+            if (stateDiv) {
+                stateDiv.className = 'value ' + (
+                    st === 16            ? 'running' :
+                    st === 256 || st === 512 ? 'fault blink' :
+                    st === 64  || st === 128 ? 'paused' : 'stopped'
+                );
+            }
+        }
+
+        // Update wire break card color
+        const wbDiv = document.getElementById('wb-div');
+        if (wbDiv) {
+            wbDiv.className = 'value ' + (wb !== null && wb !== 3 ? 'fault blink' : 'ok');
+        }
+
+        // Update faults card
+        const faultDiv  = document.getElementById('fault-div');
+        const faultUnit = document.getElementById('fault-unit');
+        if (faultDiv) {
+            const hasFault = !data.no_faults;
+            faultDiv.className = 'value ' + (hasFault ? 'fault blink' : 'ok');
+            faultDiv.textContent = hasFault ? 'FAULT' : 'NONE';
+        }
+        if (faultUnit && data.machine_faults && data.machine_faults !== 4) {
+            faultUnit.textContent = 'code: ' + data.machine_faults;
+        } else if (faultUnit) {
+            faultUnit.textContent = '';
+        }
 
         if (soundEnabled) {
             if (wb !== lastWBBits && wb !== 3 && st === 16) alertWireBreak();
