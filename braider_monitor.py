@@ -705,7 +705,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
     <title>Braider Monitor — Noble Gas Systems</title>
-    <meta http-equiv="refresh" content="3">
+    <!-- Live updates via JS fetch — no page reload needed -->
     <style>
         body  { font-family: monospace; background:#1a1a1a; color:#e0e0e0; padding:20px; margin:0; }
         h1    { color:#4fc3f7; margin-bottom:4px; }
@@ -751,7 +751,7 @@ DASHBOARD_HTML = """
                               {% elif d.machine_state in (256,512) %}fault blink
                               {% elif d.machine_state in (64,128) %}paused
                               {% else %}stopped{% endif %}">
-                {{ d.state_name or '—' }}
+                <span id="state-value">{{ d.state_name or '—' }}</span>
             </div>
             <div class="unit">
                 code {{ d.machine_state }}
@@ -775,7 +775,7 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Production — This Session</div>
-            <div class="value">{{ d.puller_pos_feet or '—' }}</div>
+            <div class="value" id="feet-value">{{ d.puller_pos_feet or '—' }}</div>
             <div class="unit">
                 feet
                 {% if d.run_complete %}&nbsp;<span class="ok">✓ RUN COMPLETE</span>{% endif %}
@@ -790,20 +790,20 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Table Speed</div>
-            <div class="value">{{ d.table_speed or '—' }}</div>
+            <div class="value" id="table-value">{{ d.table_speed or '—' }}</div>
             <div class="unit">rev/s</div>
         </div>
 
         <div class="card">
             <div class="label">Puller Speed</div>
-            <div class="value">{{ d.puller_speed or '—' }}</div>
+            <div class="value" id="puller-value">{{ d.puller_speed or '—' }}</div>
             <div class="unit">in/s</div>
         </div>
 
         <div class="card">
             <div class="label">Speed Ratio</div>
             <div class="value" style="font-size:20px">
-                {% if d.speed_ratio %}{{ "%.5f"|format(d.speed_ratio) }}{% else %}—{% endif %}
+                <span id="ratio-value">{% if d.speed_ratio %}{{ "%.5f"|format(d.speed_ratio) }}{% else %}—{% endif %}</span>
             </div>
             <div class="unit">puller ÷ table</div>
         </div>
@@ -811,7 +811,7 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Taper Sensor</div>
             <div class="value" style="font-size:22px">
-                {% if d.taper_sensor %}{{ "%.2f"|format(d.taper_sensor) }}{% else %}—{% endif %}
+<span id="taper-value">{% if d.taper_sensor %}{{ "%.2f"|format(d.taper_sensor) }}{% else %}—{% endif %}</span>
             </div>
             <div class="unit">raw units — units TBD</div>
         </div>
@@ -837,7 +837,7 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Wire Break Inputs</div>
             <div class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
-                {{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}
+                <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
             </div>
             <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = 3</div>
         </div>
@@ -891,13 +891,18 @@ DASHBOARD_HTML = """
 
     </div>
 
-    <div class="conn">
-        PLC: <span class="{{ 'ok' if d.connected else 'fault' }}">
-            {% if d.connected %}CONNECTED{% else %}DISCONNECTED — {{ d.last_error }}{% endif %}
-        </span>
+    <!-- ── LIVE CHART ──────────────────────────────────────── -->
+    <div class="section">Live — Last 60 Seconds</div>
+    <div style="background:#2a2a2a; border-radius:8px; padding:14px; margin-bottom:12px;">
+        <canvas id="liveChart" height="120"></canvas>
+    </div>
+
+    <div class="conn" id="conn-bar">
+        PLC: <span id="conn-status" class="ok">CONNECTED</span>
         &nbsp;|&nbsp; Logs: {{ log_dir }}
         &nbsp;|&nbsp; Braider_2
         &nbsp;|&nbsp; <span id="sound-toggle" onclick="toggleSound()" style="cursor:pointer">🔔 Sound ON</span>
+        &nbsp;|&nbsp; <span id="last-update" style="color:#555"></span>
     </div>
 
 <script>
@@ -957,6 +962,155 @@ if (soundEnabled) {
 
 sessionStorage.setItem('lastState',  currentState);
 sessionStorage.setItem('lastWBBits', currentWBBits);
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+// ── Live chart ────────────────────────────────────────────────────────────
+const MAX_POINTS = 30;  // 30 points × 2s = 60 seconds
+
+const labels       = [];
+const tableSpeed   = [];
+const pullerSpeed  = [];
+const speedRatio   = [];
+const wbBits       = [];
+const bgColors     = [];
+
+const ctx = document.getElementById('liveChart').getContext('2d');
+
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                label: 'Table Speed (rev/s)',
+                data: tableSpeed,
+                borderColor: '#4fc3f7',
+                backgroundColor: 'transparent',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.3,
+                yAxisID: 'y'
+            },
+            {
+                label: 'Puller Speed (in/s)',
+                data: pullerSpeed,
+                borderColor: '#81c784',
+                backgroundColor: 'transparent',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.3,
+                yAxisID: 'y'
+            },
+            {
+                label: 'Speed Ratio',
+                data: speedRatio,
+                borderColor: '#ffb74d',
+                backgroundColor: 'transparent',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.3,
+                yAxisID: 'y2'
+            },
+        ]
+    },
+    options: {
+        responsive: true,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: {
+                labels: { color: '#888', font: { size: 11 } }
+            }
+        },
+        scales: {
+            x: {
+                ticks: { color: '#555', maxTicksLimit: 6, font: { size: 10 } },
+                grid:  { color: '#2a2a2a' }
+            },
+            y: {
+                position: 'left',
+                ticks: { color: '#888', font: { size: 10 } },
+                grid:  { color: '#333' },
+                title: { display: true, text: 'Speed', color: '#555', font: { size: 10 } }
+            },
+            y2: {
+                position: 'right',
+                ticks: { color: '#ffb74d', font: { size: 10 } },
+                grid:  { display: false },
+                title: { display: true, text: 'Ratio', color: '#ffb74d', font: { size: 10 } }
+            }
+        }
+    }
+});
+
+// ── Fetch loop ────────────────────────────────────────────────────────────
+let lastState   = null;
+let lastWBBits  = null;
+let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
+
+async function fetchAndUpdate() {
+    try {
+        const res  = await fetch('/api/latest');
+        const data = await res.json();
+
+        const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const ts  = data.table_speed  || 0;
+        const ps  = data.puller_speed || 0;
+        const sr  = data.speed_ratio  || null;
+        const wb  = data.wire_break_bits;
+        const st  = data.machine_state;
+
+        // Rolling buffer
+        labels.push(now);
+        tableSpeed.push(ts);
+        pullerSpeed.push(ps);
+        speedRatio.push(sr);
+        wbBits.push(wb);
+
+        if (labels.length > MAX_POINTS) {
+            labels.shift(); tableSpeed.shift(); pullerSpeed.shift();
+            speedRatio.shift(); wbBits.shift();
+        }
+
+        chart.update();
+
+        // Update connection status
+        document.getElementById('conn-status').textContent = data.connected ? 'CONNECTED' : 'DISCONNECTED — ' + (data.last_error || '');
+        document.getElementById('conn-status').className = data.connected ? 'ok' : 'fault';
+        document.getElementById('last-update').textContent = 'updated ' + now;
+
+        // Update dashboard cards without full page reload
+        updateCard('state-value', data.state_name || '—');
+        updateCard('feet-value',  data.puller_pos_feet ? data.puller_pos_feet.toFixed(2) : '—');
+        updateCard('table-value', ts ? ts.toFixed(4) : '—');
+        updateCard('puller-value',ps ? ps.toFixed(4) : '—');
+        updateCard('ratio-value', sr ? sr.toFixed(5) : '—');
+        updateCard('taper-value', data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
+        updateCard('wb-value',    wb !== null ? wb : '—');
+
+        // Sound alerts
+        if (soundEnabled) {
+            if (wb !== lastWBBits && wb !== 3 && st === 16) alertWireBreak();
+            else if (st !== lastState && lastState !== null) alertStateChange();
+        }
+        lastState  = st;
+        lastWBBits = wb;
+
+    } catch(e) {
+        document.getElementById('conn-status').textContent = 'DISCONNECTED';
+        document.getElementById('conn-status').className = 'fault';
+    }
+}
+
+function updateCard(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+}
+
+// Start fetching every 2 seconds
+setInterval(fetchAndUpdate, 2000);
+fetchAndUpdate();
 </script>
 </body>
 </html>
