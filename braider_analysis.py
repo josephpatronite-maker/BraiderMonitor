@@ -128,11 +128,11 @@ def add_state_shading(fig, rows=None):
 
     for seg in segments:
         if seg['state'] == 16:
-            color, opacity = '#66bb6a', 0.07   # green — running
+            color, opacity = '#66bb6a', 0.15   # green — running (more visible)
         elif seg['state'] in (1,):
-            color, opacity = '#455a64', 0.10   # dark grey — off
+            color, opacity = '#90a4ae', 0.18   # lighter grey — off (more contrast)
         else:
-            color, opacity = '#ef5350', 0.07   # red tint — stopped/fault
+            color, opacity = '#ef5350', 0.12   # red tint — stopped/fault
 
         kwargs = dict(
             x0=str(seg['start']), x1=str(seg['end']),
@@ -370,6 +370,7 @@ if 'VFD_Freq_Command' in process.columns and 'VFD_Freq_Actual' in process.column
     ), row=2, col=1)
 
     fig5b.add_hline(y=0, line_color='white', line_dash='dot', line_width=1, row=2, col=1)
+    add_state_shading(fig5b, rows=[1, 2])
     add_wb_lines(fig5b, row=1, col=1)
     add_wb_lines(fig5b, row=2, col=1)
 
@@ -680,6 +681,7 @@ if has_sensor or has_motor:
             ), row=row_idx, col=1)
             add_wb_lines(fig6d, row=row_idx, col=1)
 
+    add_state_shading(fig6d, rows=list(range(1, rows_needed + 1)))
     fig6d.update_layout(height=400, title='Motor & Sensor Health',
                         template='plotly_dark')
     figs.append((fig6d, "Chart 6d — Motor & Sensor Health"))
