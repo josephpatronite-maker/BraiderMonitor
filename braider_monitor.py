@@ -909,10 +909,10 @@ DASHBOARD_HTML = """
 // ── All dashboard JS in one block ─────────────────────────────────────────
 
 // Sound
-let soundEnabled = sessionStorage.getItem('soundEnabled') !== 'false';
+let soundEnabled = sessionStorage.getItem('soundEnabled') === 'true';
 function toggleSound() {
     soundEnabled = !soundEnabled;
-    sessionStorage.setItem('soundEnabled', soundEnabled);
+    localStorage.setItem('soundEnabled', soundEnabled);
     document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
 }
 document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
