@@ -705,7 +705,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
     <title>Braider Monitor — Noble Gas Systems</title>
-    <meta http-equiv="refresh" content="10"><!-- fallback if JS fails -->
+    <!-- JS handles all updates -->
     <style>
         body  { font-family: monospace; background:#1a1a1a; color:#e0e0e0; padding:20px; margin:0; }
         h1    { color:#4fc3f7; margin-bottom:4px; }
