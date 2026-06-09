@@ -850,22 +850,22 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Safety</div>
             <div class="checks">
-                <span class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
+                <span id="safety-estop" class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
                     {{ '✓' if d.estop_ok else '✗' }} E-Stop
                 </span><br>
-                <span class="{{ 'ok' if d.door_ok else 'warn' }}">
+                <span id="safety-door" class="{{ 'ok' if d.door_ok else 'warn' }}">
                     {{ '✓' if d.door_ok else '✗' }} Door
                 </span><br>
-                <span class="{{ 'ok' if d.guards_ok else 'fault' }}">
+                <span id="safety-guards" class="{{ 'ok' if d.guards_ok else 'fault' }}">
                     {{ '✓' if d.guards_ok else '✗' }} Guards
                 </span><br>
-                <span class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
+                <span id="safety-motor" class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
                     {{ '✗ MOTOR OL' if d.i_table_motor_ol else '✓ Motor OK' }}
                 </span><br>
-                <span class="{{ 'fault blink' if d.i_triaxial_wb else 'ok' }}">
+                <span id="safety-triaxial" class="{{ 'fault blink' if d.i_triaxial_wb else 'ok' }}">
                     {{ '✗ TRIAXIAL WB' if d.i_triaxial_wb else '✓ Triaxial OK' }}
                 </span><br>
-                <span class="{{ 'fault blink' if d.core_break else 'ok' }}">
+                <span id="safety-core" class="{{ 'fault blink' if d.core_break else 'ok' }}">
                     {{ '✗ CORE BREAK' if d.core_break else '✓ Core OK' }}
                 </span>
             </div>
@@ -912,15 +912,24 @@ function toggleSound() {
 }
 document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
 
+let audioContext = null;
+function getAudioCtx() {
+    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state === 'suspended') audioContext.resume();
+    return audioContext;
+}
+// Init audio on first click anywhere
+document.addEventListener('click', () => getAudioCtx(), { once: true });
+
 function beep(freq, duration, volume) {
     try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.connect(gain); gain.connect(audioCtx.destination);
+        const ctx = getAudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
         gain.gain.value = volume || 0.3;
         osc.frequency.value = freq; osc.type = 'sine';
-        osc.start(); osc.stop(audioCtx.currentTime + duration / 1000);
+        osc.start(); osc.stop(ctx.currentTime + duration / 1000);
     } catch(e) {}
 }
 function alertWireBreak() {
@@ -1076,6 +1085,20 @@ async function fetchAndUpdate() {
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
         upd('wb-value',     wb !== null ? wb : '—');
+
+        // Update safety items
+        function setSafety(id, ok, okText, faultText, faultClass) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = ok ? '✓ ' + okText : '✗ ' + faultText;
+            el.className = ok ? 'ok' : faultClass;
+        }
+        setSafety('safety-estop',    data.estop_ok,        'E-Stop',    'E-STOP PRESSED', 'fault blink');
+        setSafety('safety-door',     data.door_ok,         'Door',      'Door Open',      'warn');
+        setSafety('safety-guards',   data.guards_ok,       'Guards',    'Guards Open',    'fault');
+        setSafety('safety-motor',    !data.i_table_motor_ol,'Motor OK', 'MOTOR OL',       'fault blink');
+        setSafety('safety-triaxial', !data.i_triaxial_wb,  'Triaxial OK','TRIAXIAL WB',  'fault blink');
+        setSafety('safety-core',     !data.core_break,     'Core OK',   'CORE BREAK',     'fault blink');
 
         // Update elapsed time in current state
         const elapsed = data.state_elapsed_s;
