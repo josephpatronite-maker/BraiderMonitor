@@ -912,18 +912,29 @@ function toggleSound() {
 }
 document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
 
+// Use AudioContext but keep it alive with a silent audio element
+// This allows background tab audio on most browsers
 let audioContext = null;
-function getAudioCtx() {
+let audioUnlocked = false;
+
+const silentAudio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+
+function unlockAudio() {
+    if (audioUnlocked) return;
+    silentAudio.play().catch(() => {});
     if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
     if (audioContext.state === 'suspended') audioContext.resume();
-    return audioContext;
+    audioUnlocked = true;
 }
-// Init audio on first click anywhere
-document.addEventListener('click', () => getAudioCtx(), { once: true });
+
+document.addEventListener('click', unlockAudio, { once: false });
 
 function beep(freq, duration, volume) {
     try {
-        const ctx = getAudioCtx();
+        unlockAudio();
+        const ctx = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = ctx;
+        if (ctx.state === 'suspended') ctx.resume();
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain); gain.connect(ctx.destination);
@@ -1181,6 +1192,10 @@ def dashboard():
 def api_latest():
     with _lock:
         return jsonify(_latest)
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204  # No content — suppresses 404 in browser console
 
 
 # ── Sleep prevention ─────────────────────────────────────────────────────────
