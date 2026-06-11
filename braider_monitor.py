@@ -1171,7 +1171,7 @@ async function fetchAndUpdate() {
             // Main Utilization Percentage is time spent in RUNNING state
             const runningPct = pcts['RUNNING'] || 0;
             oeeEl.textContent = runningPct.toFixed(1) + '%';
-            oeeEl.className = 'value ' + (runningPct >= 75 ? 'ok' : runningPct >= 50 ? 'warn' : 'fault');
+            oeeEl.className = 'value ' + (runningPct >= 50 ? 'ok' : runningPct >= 25 ? 'warn' : 'fault');
 
             // Generate textual legend details
             let legendHTML = '';
