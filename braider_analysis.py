@@ -693,32 +693,61 @@ else:
 if oee.empty:
     print('Skipping chart 7: oee_log.csv not found yet.')
 else:
- print('Building chart 7: OEE Summary...')
- latest       = oee.iloc[-1]
-running_hrs  = latest['Cum_Running_Hrs']
-stopped_hrs  = latest['Cum_Stopped_Hrs']
-ready_hrs    = latest['Cum_Ready_Hrs']
-total        = running_hrs + stopped_hrs + ready_hrs
-availability = 100 * running_hrs / total if total > 0 else 0
+    print('Building chart 7: OEE Summary...')
+    latest = oee.iloc[-1]
 
-print(f'  As of:        {latest["Timestamp"]}')
-print(f'  Running:      {running_hrs:,} hrs  ({100*running_hrs/total:.1f}%)')
-print(f'  Stopped:      {stopped_hrs:,} hrs  ({100*stopped_hrs/total:.1f}%)')
-print(f'  Ready/Idle:   {ready_hrs:,} hrs  ({100*ready_hrs/total:.1f}%)')
-print(f'  Availability: {availability:.1f}%')
-print(f'  Puller Life:  {latest["Puller_Life_Ft"]:,} ft')
+    # All 10 state accumulators — use .get() with fallback for older logs
+    # that may not have all columns yet
+    ALL_STATES = [
+        ('Cum_Running_Hrs',  'Running',  '#66bb6a'),
+        ('Cum_Stopped_Hrs',  'Stopped',  '#ef5350'),
+        ('Cum_Off_Hrs',      'Off',      '#78909c'),
+        ('Cum_Ready_Hrs',    'Ready',    '#4fc3f7'),
+        ('Cum_Starting_Hrs', 'Starting', '#26c6da'),
+        ('Cum_Stopping_Hrs', 'Stopping', '#ff7043'),
+        ('Cum_Pausing_Hrs',  'Pausing',  '#ffb74d'),
+        ('Cum_Paused_Hrs',   'Paused',   '#ffa726'),
+        ('Cum_Aborting_Hrs', 'Aborting', '#ab47bc'),
+        ('Cum_Aborted_Hrs',  'Aborted',  '#b71c1c'),
+    ]
 
-fig7 = go.Figure(go.Pie(
-    labels=['Running', 'Stopped', 'Ready/Idle'],
-    values=[running_hrs, stopped_hrs, ready_hrs],
-    marker_colors=['#66bb6a', '#ef5350', '#ffa726'],
-    hole=0.4
-))
-fig7.update_layout(
-    title=f'Lifetime OEE Availability — {availability:.1f}% Running',
-    template='plotly_dark', height=400
-)
-figs.append((fig7, "Chart 7"))
+    labels, values, colors = [], [], []
+    total = 0
+    for col, label, color in ALL_STATES:
+        val = latest.get(col, 0) or 0
+        if val > 0:
+            labels.append(label)
+            values.append(val)
+            colors.append(color)
+            total += val
+
+    running_hrs  = latest.get('Cum_Running_Hrs',  0) or 0
+    stopped_hrs  = latest.get('Cum_Stopped_Hrs',  0) or 0
+    off_hrs      = latest.get('Cum_Off_Hrs',      0) or 0
+    availability = 100 * running_hrs / total if total > 0 else 0
+
+    print(f'  As of:        {latest["Timestamp"]}')
+    for col, label, _ in ALL_STATES:
+        val = latest.get(col, 0) or 0
+        if val > 0:
+            print(f'  {label:<12} {val:>8,.1f} hrs  ({100*val/total:.1f}%)')
+    print(f'  Availability: {availability:.1f}%  (Running / Total)')
+    if 'Puller_Life_Ft' in latest and latest['Puller_Life_Ft']:
+        print(f'  Puller Life:  {latest["Puller_Life_Ft"]:,.0f} ft')
+
+    fig7 = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        marker_colors=colors,
+        hole=0.4,
+        textinfo='label+percent',
+        hovertemplate='%{label}: %{value:,.1f} hrs (%{percent})<extra></extra>'
+    ))
+    fig7.update_layout(
+        title=f'Lifetime OEE — {availability:.1f}% Running  |  Total: {total:,.0f} hrs',
+        template='plotly_dark', height=450
+    )
+    figs.append((fig7, "Chart 7 — OEE Lifetime"))
 
 # ── Export all charts to one HTML file ───────────────────────────────────────
 OUTPUT_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'braider_report.html')
