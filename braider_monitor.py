@@ -1171,7 +1171,15 @@ async function fetchAndUpdate() {
             // Main Utilization Percentage is time spent in RUNNING state
             const runningPct = pcts['RUNNING'] || 0;
             oeeEl.textContent = runningPct.toFixed(1) + '%';
-            oeeEl.className = 'value ' + (runningPct >= 50 ? 'ok' : runningPct >= 25 ? 'warn' : 'fault');
+
+            // Force the inline CSS style color directly to ensure class defaults are ignored
+            if (runningPct >= 50) {
+                oeeEl.style.color = '#66bb6a'; // Green (ok)
+            } else if (runningPct >= 25) {
+                oeeEl.style.color = '#ffa726'; // Yellow/Orange (warn)
+            } else {
+                oeeEl.style.color = '#ef5350'; // Red (fault)
+            }
 
             // Generate textual legend details
             let legendHTML = '';
