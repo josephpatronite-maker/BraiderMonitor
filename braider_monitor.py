@@ -777,6 +777,12 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
+        <div class="card">
+            <div class="label">Daily Equipment Utilization</div>
+            <div class="value" id="oee-value" style="color:#66bb6a">—</div>
+            <div class="unit" id="oee-breakdown" style="font-size:10px">running / logged time</div>
+        </div>
+
     </div>
 
     <!-- ── PROCESS ─────────────────────────────────────────── -->
@@ -786,7 +792,7 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Table Speed</div>
             <div class="value" id="table-value">{{ d.table_speed or '—' }}</div>
-            <div class="unit">rev/s</div>
+            <div class="unit">rev/s &nbsp;|&nbsp; <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm</div>
         </div>
 
         <div class="card">
@@ -1123,6 +1129,7 @@ async function fetchAndUpdate() {
         const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = isStale ? '—' : v; };
         upd('feet-value',   data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
         upd('table-value',  ts ? ts.toFixed(4) : '—');
+        upd('table-rpm-value', ts ? (ts * 60).toFixed(1) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
@@ -1153,6 +1160,30 @@ async function fetchAndUpdate() {
             } else {
                 elapsedEl.textContent = '—';
             }
+        }
+
+        const runHrs   = data.cum_running_hrs || 0;
+        const stopHrs  = data.cum_stopped_hrs || 0;
+        const readyHrs = data.cum_ready_hrs   || 0;
+        const totalHrs = runHrs + stopHrs + readyHrs;
+
+        const oeeEl = document.getElementById('oee-value');
+        const oeeBreakdownEl = document.getElementById('oee-breakdown');
+        
+        if (oeeEl && totalHrs > 0 && !isStale) {
+            const oeePct = (runHrs / totalHrs) * 100;
+            oeeEl.textContent = oeePct.toFixed(1) + '%';
+            
+            // Dynamically adjust color bounds depending on efficiency limits
+            oeeEl.className = 'value ' + (oeePct >= 75 ? 'ok' : oeePct >= 50 ? 'warn' : 'fault');
+            
+            if (oeeBreakdownEl) {
+                oeeBreakdownEl.textContent = `${runHrs.toFixed(1)}h run / ${totalHrs.toFixed(1)}h logged`;
+            }
+        } else if (oeeEl) {
+            oeeEl.textContent = '—';
+            oeeEl.className = 'value';
+            if (oeeBreakdownEl) oeeBreakdownEl.textContent = 'running / logged time';
         }
 
         // Update state card
