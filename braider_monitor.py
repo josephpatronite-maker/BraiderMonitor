@@ -1066,6 +1066,9 @@ function drawChart() {
 let lastState  = null;
 let lastWBBits = null;
 
+let lastSeenTimestamp = "";
+let timestampAgeTicks = 0;
+
 async function fetchAndUpdate() {
     try {
         const res  = await fetch('/api/latest');
@@ -1077,19 +1080,47 @@ async function fetchAndUpdate() {
         const wb   = data.wire_break_bits;
         const st   = data.machine_state;
 
-        tableSpeed.shift();    tableSpeed.push(ts);
-        pullerSpeed.shift();   pullerSpeed.push(ps);
-        speedRatio.shift();    speedRatio.push(sr);
+        // ── BULLETPROOF STALE CHECK (Clock-Sync Independent) ──
+        let isStale = false;
+        if (data.timestamp) {
+            if (data.timestamp === lastSeenTimestamp) {
+                // Timestamp hasn't changed since the last 2-second poll
+                timestampAgeTicks++;
+            } else {
+                // New timestamp arrived! Reset the counter
+                lastSeenTimestamp = data.timestamp;
+                timestampAgeTicks = 0;
+            }
+            
+            // If the timestamp stays identical for 5 poll cycles (10 seconds), it's stale
+            if (timestampAgeTicks >= 5 || !data.connected) {
+                isStale = true;
+            }
+        } else {
+            isStale = true;
+        }
+
+        tableSpeed.shift();    tableSpeed.push(isStale ? null : ts);
+        pullerSpeed.shift();   pullerSpeed.push(isStale ? null : ps);
+        speedRatio.shift();    speedRatio.push(isStale ? null : sr);
         timestamps.shift();    timestamps.push(now);
-        machineStates.shift(); machineStates.push(st || 0);
+        machineStates.shift(); machineStates.push(isStale ? 0 : (st || 0));
 
         drawChart();
 
-        document.getElementById('conn-status').textContent = data.connected ? 'CONNECTED' : 'DISCONNECTED — ' + (data.last_error || '');
-        document.getElementById('conn-status').className   = data.connected ? 'ok' : 'fault';
+        // Dynamically shift connection status depending on Python thread health
+        const statusEl = document.getElementById('conn-status');
+        if (isStale || !data.connected) {
+            statusEl.textContent = 'STALE DATA — PLC UNREACHABLE';
+            statusEl.className = 'fault';
+        } else {
+            statusEl.textContent = 'CONNECTED';
+            statusEl.className = 'ok';
+        }
+        
         document.getElementById('last-update').textContent = 'updated ' + now;
 
-        const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = v; };
+        const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = isStale ? '—' : v; };
         upd('feet-value',   data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
         upd('table-value',  ts ? ts.toFixed(4) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
@@ -1097,12 +1128,12 @@ async function fetchAndUpdate() {
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
         upd('wb-value',     wb !== null ? wb : '—');
 
-        // Update safety items
+        // Update safety items (Force fault layout if stale)
         function setSafety(id, ok, okText, faultText, faultClass) {
             const el = document.getElementById(id);
             if (!el) return;
-            el.textContent = ok ? '✓ ' + okText : '✗ ' + faultText;
-            el.className = ok ? 'ok' : faultClass;
+            el.textContent = (ok && !isStale) ? '✓ ' + okText : '✗ ' + (isStale ? 'DATA STALE' : faultText);
+            el.className = (ok && !isStale) ? 'ok' : faultClass;
         }
         setSafety('safety-estop',    data.estop_ok,        'E-Stop',    'E-STOP PRESSED', 'fault blink');
         setSafety('safety-door',     data.door_ok,         'Door',      'Door Open',      'warn');
@@ -1114,19 +1145,24 @@ async function fetchAndUpdate() {
         // Update elapsed time in current state
         const elapsed = data.state_elapsed_s;
         const elapsedEl = document.getElementById('elapsed-value');
-        if (elapsedEl && elapsed) {
-            const h = Math.floor(elapsed / 3600);
-            const m = Math.floor((elapsed % 3600) / 60);
-            elapsedEl.textContent = h + 'h ' + m + 'm';
+        if (elapsedEl) {
+            if (elapsed && !isStale) {
+                const h = Math.floor(elapsed / 3600);
+                const m = Math.floor((elapsed % 3600) / 60);
+                elapsedEl.textContent = h + 'h ' + m + 'm';
+            } else {
+                elapsedEl.textContent = '—';
+            }
         }
 
-        // Update state card — text AND color class
+        // Update state card
         const stateEl = document.getElementById('state-value');
         if (stateEl) {
-            stateEl.textContent = data.state_name || '—';
+            stateEl.textContent = isStale ? 'UNKNOWN (DISCONNECTED)' : (data.state_name || '—');
             const stateDiv = document.getElementById('state-div');
             if (stateDiv) {
                 stateDiv.className = 'value ' + (
+                    isStale              ? 'stopped' :
                     st === 16            ? 'running' :
                     st === 256 || st === 512 ? 'fault blink' :
                     st === 64  || st === 128 ? 'paused' : 'stopped'
@@ -1137,7 +1173,7 @@ async function fetchAndUpdate() {
         // Update wire break card color
         const wbDiv = document.getElementById('wb-div');
         if (wbDiv) {
-            wbDiv.className = 'value ' + (wb !== null && wb !== 3 ? 'fault blink' : 'ok');
+            wbDiv.className = 'value ' + (wb !== null && wb !== 3 && !isStale ? 'fault blink' : 'ok');
         }
 
         // Update faults card
@@ -1145,20 +1181,24 @@ async function fetchAndUpdate() {
         const faultUnit = document.getElementById('fault-unit');
         if (faultDiv) {
             const hasFault = !data.no_faults;
-            faultDiv.className = 'value ' + (hasFault ? 'fault blink' : 'ok');
-            faultDiv.textContent = hasFault ? 'FAULT' : 'NONE';
+            faultDiv.className = 'value ' + ((hasFault && !isStale) ? 'fault blink' : 'ok');
+            faultDiv.textContent = isStale ? 'UNKNOWN' : (hasFault ? 'FAULT' : 'NONE');
         }
-        if (faultUnit && data.machine_faults && data.machine_faults !== 4) {
+        if (faultUnit && data.machine_faults && data.machine_faults !== 4 && !isStale) {
             faultUnit.textContent = 'code: ' + data.machine_faults;
         } else if (faultUnit) {
             faultUnit.textContent = '';
         }
 
-        if (soundEnabled) {
+        if (soundEnabled && !isStale) {
             if (wb !== lastWBBits && wb !== 3 && st === 16) alertWireBreak();
             else if (st !== lastState && lastState !== null) alertStateChange();
         }
-        lastState  = st; lastWBBits = wb;
+        
+        if (!isStale) {
+            lastState = st; 
+            lastWBBits = wb;
+        }
 
     } catch(e) {
         const cs = document.getElementById('conn-status');
