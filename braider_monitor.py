@@ -241,6 +241,74 @@ def write_csv_row(filepath, row: dict):
             writer.writeheader()
         writer.writerow(row)
 
+def calculate_daily_state_percentages():
+    """
+    Reads the process_log.csv from the bottom up, filters for rows matching 
+    the current calendar day, and calculates the percentage of time spent in each state.
+    """
+    import os
+    if not os.path.exists(PROCESS_LOG) or os.path.getsize(PROCESS_LOG) == 0:
+        return {}
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    state_counts = {}
+    total_rows = 0
+
+    # Read backward in chunks to optimize Pi memory usage
+    with open(PROCESS_LOG, 'rb') as f:
+        try:
+            f.seek(0, os.SEEK_END)
+            position = f.tell()
+            buffer = bytearray()
+            chunk_size = 4096
+            done = False
+
+            while position > 0 and not done:
+                if position - chunk_size > 0:
+                    position -= chunk_size
+                    f.seek(position)
+                    chunk = f.read(chunk_size)
+                else:
+                    chunk = f.read(position)
+                    position = 0
+                
+                buffer = chunk + buffer
+                lines = buffer.split(b'\n')
+                
+                # Keep the incomplete first line for the next iteration
+                if position > 0:
+                    buffer = lines[0]
+                    lines = lines[1:]
+                else:
+                    buffer = bytearray()
+
+                for line in reversed(lines):
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if not line_str or line_str.startswith('Timestamp'):
+                        continue
+                    
+                    parts = line_str.split(',')
+                    if len(parts) > 2:
+                        row_timestamp = parts[0] # YYYY-MM-DD HH:MM:SS
+                        if row_timestamp.startswith(today_str):
+                            state_name = parts[3] # State_Name column
+                            if state_name:
+                                state_counts[state_name] = state_counts.get(state_name, 0) + 1
+                                total_rows += 1
+                        else:
+                            # We found a row from yesterday! We can safely stop scanning.
+                            done = True
+                            break
+        except Exception as e:
+            log.error(f"Error calculating daily OEE percentages: {e}")
+            return {}
+
+    if total_rows == 0:
+        return {}
+
+    # Convert counts to exact percentages
+    return {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
+
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -624,6 +692,7 @@ def monitor_loop():
                             'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
                             'estop_recover':      d.get('EStop_Recover'),
                             'connected':          True,
+                            'daily_state_pcts':   calculate_daily_state_percentages(),
                         })
 
                     archive_logs()
@@ -732,10 +801,15 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
-        <div class="card">
-            <div class="label">Daily Equipment Utilization</div>
-            <div id="oee-value" class="value">—</div>
-            <div id="oee-breakdown" class="unit">running / logged time</div>
+        <div class="card" style="display: flex; align-items: center; gap: 15px; min-width: 240px;">
+            <div style="flex: 1;">
+                <div class="label">Daily Utilization</div>
+                <div id="oee-value" class="value" style="font-size: 24px; margin-bottom: 2px;">—</div>
+                <div id="oee-legend" style="font-size: 10px; line-height: 1.4; color: #aaa; max-height: 75px; overflow-y: auto;"></div>
+            </div>
+            <div style="width: 80px; height: 80px; position: relative;">
+                <canvas id="oeePieCanvas" width="80" height="80"></canvas>
+            </div>
         </div>
 
     </div>
@@ -1075,32 +1149,73 @@ async function fetchAndUpdate() {
             }
         }
 
-        // ── Daily Equipment Utilization Calculation ──────────────────────────
-        const runHrs   = data.cum_running_hrs;
-        const stopHrs  = data.cum_stopped_hrs;
-        const readyHrs = data.cum_ready_hrs;
-        
+       // ── Daily Equipment Utilization Pie Chart calculation ────────────────
+        const pcts = data.daily_state_pcts || {};
         const oeeEl = document.getElementById('oee-value');
-        const oeeBreakdownEl = document.getElementById('oee-breakdown');
-        
-        if (oeeEl && runHrs !== null && stopHrs !== null && readyHrs !== null) {
-            const totalHrs = runHrs + stopHrs + readyHrs;
-            if (totalHrs > 0 && !isStale) {
-                const oeePct = (runHrs / totalHrs) * 100;
-                oeeEl.textContent = oeePct.toFixed(1) + '%';
-                oeeEl.className = 'value ' + (oeePct >= 75 ? 'ok' : oeePct >= 50 ? 'warn' : 'fault');
-                if (oeeBreakdownEl) {
-                    oeeBreakdownEl.textContent = `${runHrs.toFixed(1)}h run / ${totalHrs.toFixed(1)}h logged`;
+        const legendEl = document.getElementById('oee-legend');
+        const pieCanvas = document.getElementById('oeePieCanvas');
+
+        // Color definitions matching the style scheme in braider_analysis.py
+        const stateColors = {
+            'RUNNING':  '#66bb6a', // Green
+            'READY':    '#4fc3f7', // Light Blue
+            'STOPPED':  '#ef5350', // Red
+            'PAUSED':   '#ffa726', // Orange
+            'OFF':      '#78909c', // Gray
+            'FAULT':    '#d32f2f', // Dark Red
+            'ABORTED':  '#b71c1c', 
+            'UNKNOWN':  '#555555'
+        };
+
+        if (oeeEl && Object.keys(pcts).length > 0 && !isStale) {
+            // Main Utilization Percentage is time spent in RUNNING state
+            const runningPct = pcts['RUNNING'] || 0;
+            oeeEl.textContent = runningPct.toFixed(1) + '%';
+            oeeEl.className = 'value ' + (runningPct >= 75 ? 'ok' : runningPct >= 50 ? 'warn' : 'fault');
+
+            // Generate textual legend details
+            let legendHTML = '';
+            for (const [state, pct] of Object.entries(pcts)) {
+                const color = stateColors[state] || '#999';
+                legendHTML += `<div><span style="display:inline-block; width:8px; height:8px; background:${color}; margin-right:4px; border-radius:2px;"></span>${state}: ${pct}%</div>`;
+            }
+            if (legendEl) legendEl.innerHTML = legendHTML;
+
+            // Render the Canvas Pie Chart
+            if (pieCanvas) {
+                const ctx = pieCanvas.getContext('2d');
+                ctx.clearRect(0, 0, 80, 80);
+                
+                let startAngle = -Math.PI / 2; // Start exactly at 12 o'clock
+                
+                for (const [state, pct] of Object.entries(pcts)) {
+                    if (pct <= 0) continue;
+                    const sliceAngle = (pct / 100) * (2 * Math.PI);
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(40, 40); // Center point
+                    ctx.arc(40, 40, 38, startAngle, startAngle + sliceAngle);
+                    ctx.closePath();
+                    
+                    ctx.fillStyle = stateColors[state] || '#999';
+                    ctx.fill();
+                    
+                    // Subtle slice separator line
+                    ctx.strokeStyle = '#2a2a2a';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    
+                    startAngle += sliceAngle;
                 }
-            } else {
-                oeeEl.textContent = '—';
-                oeeEl.className = 'value';
-                if (oeeBreakdownEl) oeeBreakdownEl.textContent = 'running / logged time';
             }
         } else if (oeeEl) {
             oeeEl.textContent = '—';
             oeeEl.className = 'value';
-            if (oeeBreakdownEl) oeeBreakdownEl.textContent = 'waiting for PLC metrics...';
+            if (legendEl) legendEl.textContent = isStale ? 'Data stale' : 'Waiting for metrics...';
+            if (pieCanvas) {
+                const ctx = pieCanvas.getContext('2d');
+                ctx.clearRect(0, 0, 80, 80);
+            }
         }
 
         const stateEl = document.getElementById('state-value');
