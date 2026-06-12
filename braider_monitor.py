@@ -145,6 +145,8 @@ OEE_TAGS = [
     'Loop_Length_Feet',         # Length per loop
     'Carrier_Mode',             # Carrier configuration mode
     'Current_Ratio',            # Current gear ratio
+    'Low_PPI',            # <-- Add this
+    'Hi_PPI'
 ]
 
 # Tags to watch for fault events — logged to event_log on change
@@ -453,7 +455,10 @@ def monitor_loop():
                         recipe_raw = od.get('CurrentRecipe', {})
                         if isinstance(recipe_raw, dict):
                             recipe_name     = recipe_raw.get('Name', 'Unknown')
-                            recipe_ppi      = recipe_raw.get('Body_PPI')
+                            
+                            # Use Low_PPI if available from our live poll, otherwise fallback to the recipe default
+                            recipe_ppi      = od.get('Low_PPI') if od.get('Low_PPI') is not None else recipe_raw.get('Body_PPI')
+                            
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
 
