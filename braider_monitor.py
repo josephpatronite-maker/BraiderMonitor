@@ -417,6 +417,13 @@ _latest = {
     'tablepos_endofseg':  None,
     'tablepos_endoflastseg': None,
     'puller_vel_cmd_err': None,
+    'puller_current_dist':None,
+    'table_current_dist': None,
+    'fault_wire_break':   None,
+    'fault_estop':        None,
+    'fault_puller_servo': None,
+    'fault_table_servo':  None,
+    'recover_step':       None,
     'puller_servo_ok':    None,
     'table_servo_ok':     None,
     'group_fault':        None,
@@ -1119,6 +1126,9 @@ DASHBOARD_HTML = """
 
     </div>
 
+    <!-- ── DETAIL SECTIONS (toggle) ────────────────────────── -->
+    <div id="detail-panel" style="display:none;">
+
     <!-- ── SERVO & MOTION ──────────────────────────────────── -->
     <div class="section">Servo & Motion</div>
     <div class="grid">
@@ -1228,6 +1238,36 @@ DASHBOARD_HTML = """
 
     </div>
 
+        <div class="card">
+            <div class="label">Segment Progress</div>
+            <div class="value" style="font-size:18px">
+                P: <span id="puller-seg-dist">{{ '%.2f'|format(d.puller_current_dist) if d.puller_current_dist else '—' }}</span> ft
+            </div>
+            <div class="unit">T: <span id="table-seg-dist">{{ '%.2f'|format(d.table_current_dist) if d.table_current_dist else '—' }}</span> rev · current segment</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Individual Faults</div>
+            <div class="checks" style="font-size:11px;">
+                <span id="fault-wb"     class="{{ 'fault blink' if d.fault_wire_break else 'ok' }}">{{ '✗ Wire Break' if d.fault_wire_break else '✓ Wire Break' }}</span><br>
+                <span id="fault-es"     class="{{ 'fault blink' if d.fault_estop else 'ok' }}">{{ '✗ E-Stop' if d.fault_estop else '✓ E-Stop' }}</span><br>
+                <span id="fault-puller" class="{{ 'fault blink' if d.fault_puller_servo else 'ok' }}">{{ '✗ Puller Servo' if d.fault_puller_servo else '✓ Puller Servo' }}</span><br>
+                <span id="fault-table"  class="{{ 'fault blink' if d.fault_table_servo else 'ok' }}">{{ '✗ Table Servo' if d.fault_table_servo else '✓ Table Servo' }}</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="label">Recovery Step</div>
+            <div class="value" style="font-size:26px">
+                <span id="recover-step">{{ d.recover_step or '—' }}</span>
+            </div>
+            <div class="unit">wire break recovery progress</div>
+        </div>
+
+    </div><!-- end operator grid -->
+
+    </div><!-- end detail-panel -->
+
     <div class="section">Live — Last 2.5 Minutes</div>
     <div style="background:#2a2a2a; border-radius:8px; padding:14px; margin-bottom:12px;">
         <canvas id="liveChart" style="width:100%; height:300px; display:block;"></canvas>
@@ -1238,11 +1278,28 @@ DASHBOARD_HTML = """
         &nbsp;|&nbsp; Logs: {{ log_dir }}
         &nbsp;|&nbsp; Braider_2
         &nbsp;|&nbsp; <span id="sound-toggle" onclick="toggleSound()" style="cursor:pointer">🔔 Sound ON</span>
+        &nbsp;|&nbsp; <span id="detail-toggle" onclick="toggleDetail()" style="cursor:pointer">🔍 Details OFF</span>
         &nbsp;|&nbsp; <span id="last-update" style="color:#555"></span>
     </div>
 
 <script>
 let soundEnabled = localStorage.getItem('soundEnabled') === 'true';
+
+// Detail panel toggle
+let detailVisible = localStorage.getItem('detailVisible') === 'true';
+function toggleDetail() {
+    detailVisible = !detailVisible;
+    localStorage.setItem('detailVisible', detailVisible);
+    document.getElementById('detail-panel').style.display = detailVisible ? 'block' : 'none';
+    document.getElementById('detail-toggle').textContent = detailVisible ? '🔍 Details ON' : '🔍 Details OFF';
+}
+// Apply saved state on load
+document.addEventListener('DOMContentLoaded', function() {
+    if (detailVisible) {
+        document.getElementById('detail-panel').style.display = 'block';
+        document.getElementById('detail-toggle').textContent = '🔍 Details ON';
+    }
+});
 function toggleSound() {
     soundEnabled = !soundEnabled;
     localStorage.setItem('soundEnabled', soundEnabled);
@@ -1474,6 +1531,23 @@ async function fetchAndUpdate() {
                         lampRun.className    = data.lamp_running ? 'ok' : 'muted'; }
         if (lampStop) { lampStop.textContent = data.lamp_stopped ? '● Stopped'  : '○ Stopped';
                         lampStop.className   = data.lamp_stopped ? 'fault' : 'ok'; }
+        // Segment distances
+        upd('puller-seg-dist', data.puller_current_dist !== null && data.puller_current_dist !== undefined
+            ? data.puller_current_dist.toFixed(2) : '—');
+        upd('table-seg-dist',  data.table_current_dist  !== null && data.table_current_dist  !== undefined
+            ? data.table_current_dist.toFixed(2) : '—');
+        upd('recover-step',    data.recover_step !== null ? data.recover_step : '—');
+        // Individual faults
+        function setFault(id, active, okText, faultText) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = active ? '✗ ' + faultText : '✓ ' + okText;
+            el.className   = active ? 'fault blink' : 'ok';
+        }
+        setFault('fault-wb',     data.fault_wire_break,   'Wire Break',  'Wire Break');
+        setFault('fault-es',     data.fault_estop,        'E-Stop',      'E-Stop');
+        setFault('fault-puller', data.fault_puller_servo, 'Puller Servo','Puller Servo');
+        setFault('fault-table',  data.fault_table_servo,  'Table Servo', 'Table Servo');
         // Buttons
         function setBtn(id, active, activeText, inactiveText, activeClass) {
             const el = document.getElementById(id);
