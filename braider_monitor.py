@@ -123,6 +123,18 @@ FAST_TAGS = [
     # Wire break recovery
     'WireBreak_Move',           # Distance machine backed up after wire break
     'EStop_Recover',            # E-stop recovery sequence active
+    # Servo axis sub-tags — velocity diagnostics
+    'servoPuller_Axis.ActualVelocity',
+    'servoPuller_Axis.ActualAcceleration',
+    'servoPuller_Axis.VelocityError',
+    'servoPuller_Axis.CommandVelocity',
+    'servoPuller_Axis.MotionStatus',
+    'servoTable_Axis.ActualVelocity',
+    'servoTable_Axis.ActualAcceleration',
+    'servoTable_Axis.VelocityError',
+    'servoTable_Axis.MotionStatus',
+    'servoBraider_Group.GroupStatus',
+    'servoBraider_Group.GroupFault',
 ]
 
 # 60s poll — OEE accumulators + recipe
@@ -416,8 +428,6 @@ def monitor_loop():
 
                     # ── OEE poll (Runs instantly on first loop connection) ────
                     cum_running = cum_stopped = cum_ready = None
-                    cum_off = cum_starting = cum_stopping = None
-                    cum_pausing = cum_paused = cum_aborting = cum_aborted = None
                     recipe_modified = mandrel_mode = None
 
                     if last_oee_poll == 0 or (now - last_oee_poll >= OEE_POLL_INTERVAL):
@@ -428,19 +438,9 @@ def monitor_loop():
                         if isinstance(stats, dict):
                             cum = stats.get('Cum_State_Time', {})
                             if isinstance(cum, dict):
-                                cum_running  = cum.get('Running',  {}).get('Hours')
-                                cum_stopped  = cum.get('Stopped',  {}).get('Hours')
-                                cum_ready    = cum.get('Ready',    {}).get('Hours')
-                                cum_off      = cum.get('Off',      {}).get('Hours')
-                                cum_starting = cum.get('Starting', {}).get('Hours')
-                                cum_stopping = cum.get('Stopping', {}).get('Hours')
-                                cum_pausing  = cum.get('Pausing',  {}).get('Hours')
-                                cum_paused   = cum.get('Paused',   {}).get('Hours')
-                                cum_aborting = cum.get('Aborting', {}).get('Hours')
-                                cum_aborted  = cum.get('Aborted',  {}).get('Hours')
-                            else:
-                                cum_off = cum_starting = cum_stopping = None
-                                cum_pausing = cum_paused = cum_aborting = cum_aborted = None
+                                cum_running = cum.get('Running', {}).get('Hours')
+                                cum_stopped = cum.get('Stopped', {}).get('Hours')
+                                cum_ready   = cum.get('Ready',   {}).get('Hours')
 
                         recipe_raw = od.get('CurrentRecipe', {})
                         if isinstance(recipe_raw, dict):
@@ -470,13 +470,6 @@ def monitor_loop():
                             'Cum_Running_Hrs':    cum_running,
                             'Cum_Stopped_Hrs':    cum_stopped,
                             'Cum_Ready_Hrs':      cum_ready,
-                            'Cum_Off_Hrs':        cum_off,
-                            'Cum_Starting_Hrs':   cum_starting,
-                            'Cum_Stopping_Hrs':   cum_stopping,
-                            'Cum_Pausing_Hrs':    cum_pausing,
-                            'Cum_Paused_Hrs':     cum_paused,
-                            'Cum_Aborting_Hrs':   cum_aborting,
-                            'Cum_Aborted_Hrs':    cum_aborted,
                             'Puller_Life_Ft':     stats.get('Puller_Life_Ft')     if isinstance(stats, dict) else None,
                             'Table_Life_1k_Revs': stats.get('Table_Life_1k_Revs') if isinstance(stats, dict) else None,
                         }
@@ -540,6 +533,18 @@ def monitor_loop():
                         'Inactivity_Secs':    d.get('Inactivity_Timer.ACC'),
                         'WireBreak_Move':     d.get('WireBreak_Move'),
                         'EStop_Recover':      d.get('EStop_Recover'),
+                    # Servo axis diagnostics
+                    'Puller_ActualVelocity': d.get('servoPuller_Axis.ActualVelocity'),
+                    'Puller_ActualAccel':    d.get('servoPuller_Axis.ActualAcceleration'),
+                    'Puller_VelocityError':  d.get('servoPuller_Axis.VelocityError'),
+                    'Puller_CmdVelocity':    d.get('servoPuller_Axis.CommandVelocity'),
+                    'Puller_MotionStatus':   d.get('servoPuller_Axis.MotionStatus'),
+                    'Table_ActualVelocity':  d.get('servoTable_Axis.ActualVelocity'),
+                    'Table_ActualAccel':     d.get('servoTable_Axis.ActualAcceleration'),
+                    'Table_VelocityError':   d.get('servoTable_Axis.VelocityError'),
+                    'Table_MotionStatus':    d.get('servoTable_Axis.MotionStatus'),
+                    'Group_Status':          d.get('servoBraider_Group.GroupStatus'),
+                    'Group_Fault':           d.get('servoBraider_Group.GroupFault'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
@@ -683,16 +688,9 @@ def monitor_loop():
                             'state_elapsed_s':    state_elapsed_s,
                             'discrete_distance':  d.get('Discrete_Distance'),
                             'discrete_loops':     d.get('Discrete_Loops'),
-                            'cum_running_hrs':    cum_running  if cum_running  is not None else _latest.get('cum_running_hrs'),
-                            'cum_stopped_hrs':    cum_stopped  if cum_stopped  is not None else _latest.get('cum_stopped_hrs'),
-                            'cum_ready_hrs':      cum_ready    if cum_ready    is not None else _latest.get('cum_ready_hrs'),
-                            'cum_off_hrs':        cum_off      if cum_off      is not None else _latest.get('cum_off_hrs'),
-                            'cum_starting_hrs':   cum_starting if cum_starting is not None else _latest.get('cum_starting_hrs'),
-                            'cum_stopping_hrs':   cum_stopping if cum_stopping is not None else _latest.get('cum_stopping_hrs'),
-                            'cum_pausing_hrs':    cum_pausing  if cum_pausing  is not None else _latest.get('cum_pausing_hrs'),
-                            'cum_paused_hrs':     cum_paused   if cum_paused   is not None else _latest.get('cum_paused_hrs'),
-                            'cum_aborting_hrs':   cum_aborting if cum_aborting is not None else _latest.get('cum_aborting_hrs'),
-                            'cum_aborted_hrs':    cum_aborted  if cum_aborted  is not None else _latest.get('cum_aborted_hrs'),
+                            'cum_running_hrs':    cum_running if cum_running is not None else _latest.get('cum_running_hrs'),
+                            'cum_stopped_hrs':    cum_stopped if cum_stopped is not None else _latest.get('cum_stopped_hrs'),
+                            'cum_ready_hrs':      cum_ready if cum_ready is not None else _latest.get('cum_ready_hrs'),
                             'recipe_modified':    recipe_modified,
                             'mandrel_mode':       mandrel_mode,
                             'vfd_freq_actual':    d.get('Table_Drive:I.OutputFreq'),
@@ -717,6 +715,17 @@ def monitor_loop():
                             'new_part':           d.get('New_Part_Latch'),
                             'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
                             'estop_recover':      d.get('EStop_Recover'),
+                            'puller_actual_vel':  d.get('servoPuller_Axis.ActualVelocity'),
+                            'puller_actual_accel':d.get('servoPuller_Axis.ActualAcceleration'),
+                            'puller_vel_error':   d.get('servoPuller_Axis.VelocityError'),
+                            'puller_cmd_vel':     d.get('servoPuller_Axis.CommandVelocity'),
+                            'puller_motion_status':d.get('servoPuller_Axis.MotionStatus'),
+                            'table_actual_vel':   d.get('servoTable_Axis.ActualVelocity'),
+                            'table_actual_accel': d.get('servoTable_Axis.ActualAcceleration'),
+                            'table_vel_error':    d.get('servoTable_Axis.VelocityError'),
+                            'table_motion_status':d.get('servoTable_Axis.MotionStatus'),
+                            'group_status':       d.get('servoBraider_Group.GroupStatus'),
+                            'group_fault':        d.get('servoBraider_Group.GroupFault'),
                             'connected':          True,
                             'daily_state_pcts':   calculate_daily_state_percentages(),
                         })
@@ -1184,16 +1193,13 @@ async function fetchAndUpdate() {
         // Color definitions matching the style scheme in braider_analysis.py
         const stateColors = {
             'RUNNING':  '#66bb6a', // Green
-            'STOPPED':  '#ef5350', // Red
-            'OFF':      '#78909c', // Gray
             'READY':    '#4fc3f7', // Light Blue
-            'STARTING': '#26c6da', // Teal
-            'STOPPING': '#ff7043', // Deep Orange
-            'PAUSING':  '#ffb74d', // Amber
+            'STOPPED':  '#ef5350', // Red
             'PAUSED':   '#ffa726', // Orange
-            'ABORTING': '#ab47bc', // Purple
-            'ABORTED':  '#b71c1c', // Dark Red
-            'UNKNOWN':  '#555555'  // Grey
+            'OFF':      '#78909c', // Gray
+            'FAULT':    '#d32f2f', // Dark Red
+            'ABORTED':  '#b71c1c', 
+            'UNKNOWN':  '#555555'
         };
 
         if (oeeEl && Object.keys(pcts).length > 0 && !isStale) {
@@ -1303,27 +1309,8 @@ async function fetchAndUpdate() {
 }
 
 window.addEventListener('resize', drawChart);
-// Auto-reload if PLC reconnects — timestamp change detected
-let lastTimestamp = null;
-let staleCount = 0;
-
-async function fetchAndUpdateWrapped() {
-    await fetchAndUpdate();
-    const ts = document.getElementById('last-update') ? 
-               document.getElementById('last-update').textContent : null;
-    if (ts === lastTimestamp) {
-        staleCount++;
-        if (staleCount >= 8) { // 8 × 2s = 16s with no update
-            location.reload();
-        }
-    } else {
-        staleCount = 0;
-        lastTimestamp = ts;
-    }
-}
-
-setInterval(fetchAndUpdateWrapped, 2000);
-fetchAndUpdateWrapped();
+setInterval(fetchAndUpdate, 2000);
+fetchAndUpdate();
 </script>
 </body>
 </html>
