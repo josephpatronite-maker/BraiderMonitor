@@ -123,35 +123,6 @@ FAST_TAGS = [
     # Wire break recovery
     'WireBreak_Move',           # Distance machine backed up after wire break
     'EStop_Recover',            # E-stop recovery sequence active
-    # Servo axis sub-tags
-    'servoPuller_Axis.ActualVelocity',
-    'servoPuller_Axis.ActualAcceleration',
-    'servoPuller_Axis.VelocityError',
-    'servoPuller_Axis.CommandVelocity',
-    'servoPuller_Axis.MotionStatus',
-    'servoTable_Axis.ActualVelocity',
-    'servoTable_Axis.ActualAcceleration',
-    'servoTable_Axis.VelocityError',
-    'servoTable_Axis.MotionStatus',
-    'servoBraider_Group.GroupStatus',
-    'servoBraider_Group.GroupFault',
-    # Program-scoped tags — high value
-    'Program:P01_TableDrive.Ave_Current_Data',      # Average table drive current — motor load
-    'Program:P01_TableDrive.Abs_Value_Peak',        # Peak current sample
-    'Program:P01_TableDrive.Servo_Axis_Faults',     # Servo fault code
-    'Program:P01_TableDrive.Table_Speed_Temp',      # Speed during transitions
-    'Program:MainProgram.Fault_WireBreak',          # Wire break fault flag
-    'Program:MainProgram.Fault_EStop',              # E-stop fault flag
-    'Program:MainProgram.Fault_GuardDoor',          # Guard door fault flag
-    'Program:MainProgram.Fault_PullerServo',        # Puller servo fault flag
-    'Program:MainProgram.Fault_TableServo',         # Table servo fault flag
-    'Program:MainProgram.Fault_StartingTimeout',    # Starting timeout fault flag
-    'Program:MainProgram.Fault_SERCOS',             # Servo comms fault
-    'Program:MainProgram.Table_Drive_Fault',        # Table drive fault
-    'Program:MainProgram.Puller_Current_Dist',      # Puller distance this segment
-    'Program:MainProgram.Table_Current_Dist',       # Table distance this segment
-    'Program:MainProgram.Recover_Step',             # Wire break recovery step
-    'Program:MainProgram.StateMirror',              # Machine state mirror
 ]
 
 # 60s poll — OEE accumulators + recipe
@@ -550,35 +521,6 @@ def monitor_loop():
                         'Inactivity_Secs':    d.get('Inactivity_Timer.ACC'),
                         'WireBreak_Move':     d.get('WireBreak_Move'),
                         'EStop_Recover':      d.get('EStop_Recover'),
-                    # Servo axis diagnostics
-                    'Puller_ActualVelocity': d.get('servoPuller_Axis.ActualVelocity'),
-                    'Puller_ActualAccel':    d.get('servoPuller_Axis.ActualAcceleration'),
-                    'Puller_VelocityError':  d.get('servoPuller_Axis.VelocityError'),
-                    'Puller_CmdVelocity':    d.get('servoPuller_Axis.CommandVelocity'),
-                    'Puller_MotionStatus':   d.get('servoPuller_Axis.MotionStatus'),
-                    'Table_ActualVelocity':  d.get('servoTable_Axis.ActualVelocity'),
-                    'Table_ActualAccel':     d.get('servoTable_Axis.ActualAcceleration'),
-                    'Table_VelocityError':   d.get('servoTable_Axis.VelocityError'),
-                    'Table_MotionStatus':    d.get('servoTable_Axis.MotionStatus'),
-                    'Group_Status':          d.get('servoBraider_Group.GroupStatus'),
-                    'Group_Fault':           d.get('servoBraider_Group.GroupFault'),
-                    # Program-scoped tags
-                    'Ave_Current_Data':      d.get('Program:P01_TableDrive.Ave_Current_Data'),
-                    'Abs_Value_Peak':        d.get('Program:P01_TableDrive.Abs_Value_Peak'),
-                    'Servo_Axis_Faults':     d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
-                    'Table_Speed_Temp':      d.get('Program:P01_TableDrive.Table_Speed_Temp'),
-                    'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
-                    'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
-                    'Fault_GuardDoor':       d.get('Program:MainProgram.Fault_GuardDoor'),
-                    'Fault_PullerServo':     d.get('Program:MainProgram.Fault_PullerServo'),
-                    'Fault_TableServo':      d.get('Program:MainProgram.Fault_TableServo'),
-                    'Fault_StartingTimeout': d.get('Program:MainProgram.Fault_StartingTimeout'),
-                    'Fault_SERCOS':          d.get('Program:MainProgram.Fault_SERCOS'),
-                    'Table_Drive_Fault':     d.get('Program:MainProgram.Table_Drive_Fault'),
-                    'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
-                    'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
-                    'Recover_Step':          d.get('Program:MainProgram.Recover_Step'),
-                    'StateMirror':           d.get('Program:MainProgram.StateMirror'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
@@ -749,26 +691,6 @@ def monitor_loop():
                             'new_part':           d.get('New_Part_Latch'),
                             'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
                             'estop_recover':      d.get('EStop_Recover'),
-                            'puller_actual_vel':   d.get('servoPuller_Axis.ActualVelocity'),
-                            'puller_actual_accel': d.get('servoPuller_Axis.ActualAcceleration'),
-                            'puller_vel_error':    d.get('servoPuller_Axis.VelocityError'),
-                            'puller_cmd_vel':      d.get('servoPuller_Axis.CommandVelocity'),
-                            'puller_motion_status':d.get('servoPuller_Axis.MotionStatus'),
-                            'table_actual_vel':    d.get('servoTable_Axis.ActualVelocity'),
-                            'table_actual_accel':  d.get('servoTable_Axis.ActualAcceleration'),
-                            'table_vel_error':     d.get('servoTable_Axis.VelocityError'),
-                            'table_motion_status': d.get('servoTable_Axis.MotionStatus'),
-                            'group_status':        d.get('servoBraider_Group.GroupStatus'),
-                            'group_fault':         d.get('servoBraider_Group.GroupFault'),
-                            'ave_current_data':    d.get('Program:P01_TableDrive.Ave_Current_Data'),
-                            'abs_value_peak':      d.get('Program:P01_TableDrive.Abs_Value_Peak'),
-                            'servo_axis_faults':   d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
-                            'fault_wire_break':    d.get('Program:MainProgram.Fault_WireBreak'),
-                            'fault_estop':         d.get('Program:MainProgram.Fault_EStop'),
-                            'fault_guard_door':    d.get('Program:MainProgram.Fault_GuardDoor'),
-                            'recover_step':        d.get('Program:MainProgram.Recover_Step'),
-                            'puller_current_dist': d.get('Program:MainProgram.Puller_Current_Dist'),
-                            'table_current_dist':  d.get('Program:MainProgram.Table_Current_Dist'),
                             'connected':          True,
                             'daily_state_pcts':   calculate_daily_state_percentages(),
                         })
@@ -1382,6 +1304,332 @@ def api_latest():
 def favicon():
     return '', 204  
 
+
+
+
+# ── Floor Report ──────────────────────────────────────────────────────────────
+
+def get_floor_report_data():
+    """Builds today's floor report from process_log and event_log."""
+    import csv as csv_mod
+    from datetime import date, timedelta
+
+    today_str     = date.today().isoformat()
+    yesterday_str = (date.today() - timedelta(days=1)).isoformat()
+
+    def read_today_rows(filepath, today):
+        rows = []
+        if not os.path.exists(filepath):
+            return rows
+        try:
+            with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
+                all_rows = list(csv_mod.DictReader(f))
+            for row in reversed(all_rows):
+                ts = row.get('Timestamp', '')
+                if ts.startswith(today):
+                    rows.append(row)
+                elif rows:
+                    break
+            rows.reverse()
+        except Exception:
+            pass
+        return rows
+
+    def read_day_rows(filepath, day):
+        rows = []
+        if not os.path.exists(filepath):
+            return rows
+        try:
+            with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
+                for row in csv_mod.DictReader(f):
+                    if row.get('Timestamp', '').startswith(day):
+                        rows.append(row)
+        except Exception:
+            pass
+        return rows
+
+    proc_rows  = read_today_rows(PROCESS_LOG, today_str)
+    event_rows = read_today_rows(EVENT_LOG,   today_str)
+
+    # State breakdown
+    state_counts = {}
+    for row in proc_rows:
+        s = row.get('State_Name', 'UNKNOWN') or 'UNKNOWN'
+        state_counts[s] = state_counts.get(s, 0) + 1
+
+    total_rows   = len(proc_rows)
+    def pct(n):  return round(100 * n / total_rows, 1) if total_rows else 0
+    def hrs(n):  return round(n * 2 / 3600, 2) if n else 0
+
+    running_rows = state_counts.get('RUNNING', 0)
+    off_rows     = state_counts.get('OFF', 0)
+    stopped_rows = state_counts.get('STOPPED', 0)
+
+    # Vessels completed — RUNNING → OFF or STOPPED transition
+    vessels = 0
+    prev_state = None
+    for row in proc_rows:
+        s = row.get('State_Name', '')
+        if prev_state == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
+            vessels += 1
+        prev_state = s
+
+    # Bobbin changeovers — OFF state durations > 5 min
+    changeovers  = []
+    in_off       = False
+    off_start_ts = None
+    for row in proc_rows:
+        s  = row.get('State_Name', '')
+        ts = row.get('Timestamp', '')
+        if s == 'OFF' and not in_off:
+            in_off = True; off_start_ts = ts
+        elif s != 'OFF' and in_off:
+            in_off = False
+            if off_start_ts:
+                try:
+                    from datetime import datetime as dt
+                    dur = (dt.fromisoformat(ts) - dt.fromisoformat(off_start_ts)).total_seconds() / 60
+                    if dur > 5:
+                        changeovers.append({'start': off_start_ts, 'end': ts, 'min': round(dur, 1)})
+                except Exception:
+                    pass
+
+    avg_co = round(sum(c['min'] for c in changeovers) / len(changeovers), 1) if changeovers else None
+    min_co = min((c['min'] for c in changeovers), default=None)
+    max_co = max((c['min'] for c in changeovers), default=None)
+
+    # Timeline from event_log
+    timeline = []
+    wire_breaks = 0
+    for row in event_rows:
+        etype = row.get('Event_Type', '')
+        if etype == 'STATE_CHANGE':
+            timeline.append({'time': row.get('Timestamp', '')[:19],
+                             'from_state': row.get('From_State', ''),
+                             'to_state':   row.get('To_State', ''),
+                             'feet':       row.get('Puller_Pos_Feet', '')})
+        elif etype == 'WIRE_BREAK':
+            wire_breaks += 1
+            timeline.append({'time': row.get('Timestamp', '')[:19],
+                             'from_state': 'WIRE BREAK', 'to_state': '',
+                             'feet':       row.get('Puller_Pos_Feet', '')})
+
+    # Yesterday comparison
+    yest_rows    = read_day_rows(PROCESS_LOG, yesterday_str)
+    yest_total   = len(yest_rows)
+    yest_running = sum(1 for r in yest_rows if r.get('State_Name') == 'RUNNING')
+    yest_run_pct = round(100 * yest_running / yest_total, 1) if yest_total else None
+    yest_vessels = 0
+    prev = None
+    for row in yest_rows:
+        s = row.get('State_Name', '')
+        if prev == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
+            yest_vessels += 1
+        prev = s
+
+    VESSEL_TARGET      = 4
+    RUNNING_TARGET_PCT = 55.0
+
+    return {
+        'date':               today_str,
+        'total_hrs':          hrs(total_rows),
+        'running_hrs':        hrs(running_rows),
+        'running_pct':        pct(running_rows),
+        'off_hrs':            hrs(off_rows),
+        'off_pct':            pct(off_rows),
+        'stopped_pct':        pct(stopped_rows),
+        'vessels':            vessels,
+        'vessel_target':      VESSEL_TARGET,
+        'running_target_pct': RUNNING_TARGET_PCT,
+        'changeovers':        changeovers,
+        'avg_changeover':     avg_co,
+        'min_changeover':     min_co,
+        'max_changeover':     max_co,
+        'wire_breaks':        wire_breaks,
+        'timeline':           timeline,
+        'yest_running_pct':   yest_run_pct,
+        'yest_vessels':       yest_vessels,
+    }
+
+
+FLOOR_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="60">
+<title>Braider 2 — Floor Report</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background:#0d1117; color:#e6edf3; font-family:'Segoe UI',Arial,sans-serif; padding:20px; }
+h1 { font-size:2rem; color:#58a6ff; margin-bottom:4px; }
+.subtitle { color:#8b949e; font-size:1rem; margin-bottom:24px; }
+.scorecard { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-bottom:28px; }
+.card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px 16px; text-align:center; }
+.card.green  { border-color:#238636; }
+.card.red    { border-color:#da3633; }
+.card.yellow { border-color:#9e6a03; }
+.card.blue   { border-color:#1f6feb; }
+.card-label  { font-size:.78rem; color:#8b949e; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
+.card-value  { font-size:2.6rem; font-weight:700; line-height:1; }
+.card-sub    { font-size:.82rem; color:#8b949e; margin-top:5px; }
+.card-vs     { font-size:.8rem; margin-top:6px; }
+.up   { color:#3fb950; } .down { color:#f85149; } .same { color:#8b949e; }
+.bar-wrap { background:#21262d; border-radius:4px; height:8px; margin-top:10px; overflow:hidden; }
+.bar-fill  { height:100%; border-radius:4px; }
+.bar-green  { background:#238636; } .bar-yellow { background:#9e6a03; } .bar-red { background:#da3633; }
+.section-title { font-size:1.1rem; font-weight:600; color:#58a6ff; margin-bottom:12px;
+                 border-bottom:1px solid #21262d; padding-bottom:6px; }
+.section { margin-bottom:28px; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th { background:#161b22; color:#8b949e; text-align:left; padding:8px 12px; font-weight:600;
+     font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; }
+td { padding:8px 12px; border-top:1px solid #21262d; }
+tr:hover td { background:#161b22; }
+.badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:.78rem; font-weight:600; }
+.badge-running  { background:#1a4a1a; color:#3fb950; }
+.badge-off      { background:#1f2a3c; color:#58a6ff; }
+.badge-stopped  { background:#3c1a1a; color:#f85149; }
+.badge-starting { background:#1a2a3c; color:#79c0ff; }
+.badge-stopping { background:#3c2a1a; color:#d29922; }
+.badge-break    { background:#4a3000; color:#e3b341; }
+.badge-other    { background:#21262d; color:#8b949e; }
+.timeline { list-style:none; }
+.timeline li { display:flex; align-items:flex-start; gap:14px; padding:10px 0;
+               border-top:1px solid #21262d; font-size:.9rem; }
+.tl-time { color:#8b949e; min-width:85px; font-family:monospace; font-size:.85rem; }
+.tl-feet { color:#8b949e; font-size:.8rem; margin-left:auto; }
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+@media(max-width:700px){ .two-col{ grid-template-columns:1fr; } }
+.footer { color:#444; font-size:.78rem; margin-top:20px; text-align:center; }
+</style>
+</head>
+<body>
+
+<h1>Braider 2 — Daily Performance</h1>
+<div class="subtitle">{{ d.date }} &nbsp;·&nbsp; Refreshes every 60s
+  &nbsp;·&nbsp; {{ d.total_hrs }}h logged today</div>
+
+<div class="scorecard">
+
+  {% set v_color = 'green' if d.vessels >= d.vessel_target else ('yellow' if d.vessels >= d.vessel_target - 1 else 'red') %}
+  <div class="card {{ v_color }}">
+    <div class="card-label">Vessels Today</div>
+    <div class="card-value" style="color:{% if v_color=='green' %}#3fb950{% elif v_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.vessels }}</div>
+    <div class="card-sub">Target: {{ d.vessel_target }}</div>
+    {% if d.yest_vessels is not none %}
+    <div class="card-vs">
+      {% if d.vessels > d.yest_vessels %}<span class="up">▲ {{ d.vessels - d.yest_vessels }} vs yesterday</span>
+      {% elif d.vessels < d.yest_vessels %}<span class="down">▼ {{ d.yest_vessels - d.vessels }} vs yesterday</span>
+      {% else %}<span class="same">= same as yesterday</span>{% endif %}
+    </div>{% endif %}
+    <div class="bar-wrap"><div class="bar-fill bar-{{ v_color }}" style="width:{{ [100,(d.vessels/d.vessel_target*100)|int]|min }}%"></div></div>
+  </div>
+
+  {% set r_color = 'green' if d.running_pct >= d.running_target_pct else ('yellow' if d.running_pct >= d.running_target_pct - 10 else 'red') %}
+  <div class="card {{ r_color }}">
+    <div class="card-label">Running Today</div>
+    <div class="card-value" style="color:{% if r_color=='green' %}#3fb950{% elif r_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.running_pct }}%</div>
+    <div class="card-sub">{{ d.running_hrs }}h · Target {{ d.running_target_pct }}%</div>
+    {% if d.yest_running_pct is not none %}
+    <div class="card-vs">
+      {% set diff = (d.running_pct - d.yest_running_pct)|round(1) %}
+      {% if diff > 0 %}<span class="up">▲ {{ diff }}% vs yesterday</span>
+      {% elif diff < 0 %}<span class="down">▼ {{ diff|abs }}% vs yesterday</span>
+      {% else %}<span class="same">= same as yesterday</span>{% endif %}
+    </div>{% endif %}
+    <div class="bar-wrap"><div class="bar-fill bar-{{ r_color }}" style="width:{{ [100,d.running_pct|int]|min }}%"></div></div>
+  </div>
+
+  {% set c_color = 'green' if d.avg_changeover and d.avg_changeover <= 50 else ('yellow' if d.avg_changeover and d.avg_changeover <= 65 else 'red') %}
+  <div class="card {{ c_color if d.avg_changeover else 'blue' }}">
+    <div class="card-label">Avg Changeover</div>
+    <div class="card-value" style="color:{% if c_color=='green' %}#3fb950{% elif c_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">
+      {% if d.avg_changeover %}{{ d.avg_changeover }}<span style="font-size:1.2rem">m</span>
+      {% else %}<span style="font-size:1.4rem;color:#8b949e">—</span>{% endif %}
+    </div>
+    <div class="card-sub">{% if d.min_changeover %}Best {{ d.min_changeover }}m · Worst {{ d.max_changeover }}m{% else %}No changeovers yet{% endif %}</div>
+    <div class="card-sub" style="margin-top:4px">Target: ≤50 min</div>
+  </div>
+
+  {% set w_color = 'green' if d.wire_breaks == 0 else ('yellow' if d.wire_breaks <= 2 else 'red') %}
+  <div class="card {{ w_color }}">
+    <div class="card-label">Wire Breaks</div>
+    <div class="card-value" style="color:{% if w_color=='green' %}#3fb950{% elif w_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.wire_breaks }}</div>
+    <div class="card-sub">{% if d.wire_breaks == 0 %}Clean day ✓{% elif d.wire_breaks == 1 %}1 break{% else %}{{ d.wire_breaks }} breaks{% endif %}</div>
+  </div>
+
+  {% set s_color = 'green' if d.stopped_pct <= 10 else ('yellow' if d.stopped_pct <= 20 else 'red') %}
+  <div class="card {{ s_color }}">
+    <div class="card-label">Unplanned Stops</div>
+    <div class="card-value" style="color:{% if s_color=='green' %}#3fb950{% elif s_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.stopped_pct }}%</div>
+    <div class="card-sub">of shift in STOPPED state</div>
+  </div>
+
+</div>
+
+<div class="two-col">
+  <div class="section">
+    <div class="section-title">Bobbin Changeovers Today ({{ d.changeovers|length }})</div>
+    {% if d.changeovers %}
+    <table>
+      <thead><tr><th>#</th><th>Start</th><th>End</th><th>Duration</th><th>Rating</th></tr></thead>
+      <tbody>
+      {% for c in d.changeovers %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ c.start[11:19] }}</td>
+        <td>{{ c.end[11:19] }}</td>
+        <td><strong>{{ c.min }} min</strong></td>
+        <td>{% if c.min <= 45 %}<span style="color:#3fb950">● Fast</span>
+            {% elif c.min <= 55 %}<span style="color:#d29922">● On time</span>
+            {% else %}<span style="color:#f85149">● Slow</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p style="color:#8b949e;padding:12px 0">No changeovers recorded yet today.</p>
+    {% endif %}
+  </div>
+
+  <div class="section">
+    <div class="section-title">State Timeline ({{ d.timeline|length }} events)</div>
+    {% if d.timeline %}
+    <ul class="timeline">
+    {% for t in d.timeline[-30:] | reverse %}
+      <li>
+        <span class="tl-time">{{ t.time[11:] }}</span>
+        {% if t.from_state == 'WIRE BREAK' %}
+          <span class="badge badge-break">⚡ WIRE BREAK</span>
+        {% else %}
+          {% set fs = t.from_state|upper %}
+          {% set ts2 = t.to_state|upper %}
+          <span class="badge {% if fs=='RUNNING' %}badge-running{% elif fs=='OFF' %}badge-off{% elif fs in ('STOPPED','ABORTED','ABORTING') %}badge-stopped{% elif fs in ('STARTING','STOPPING') %}badge-starting{% else %}badge-other{% endif %}">{{ fs }}</span>
+          <span style="color:#30363d">→</span>
+          <span class="badge {% if ts2=='RUNNING' %}badge-running{% elif ts2=='OFF' %}badge-off{% elif ts2 in ('STOPPED','ABORTED','ABORTING') %}badge-stopped{% elif ts2 in ('STARTING','STOPPING') %}badge-starting{% else %}badge-other{% endif %}">{{ ts2 }}</span>
+        {% endif %}
+        {% if t.feet %}<span class="tl-feet">{{ t.feet|float|round(1) }} ft</span>{% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+    {% if d.timeline|length > 30 %}<p style="color:#8b949e;font-size:.8rem;margin-top:8px">Showing last 30 of {{ d.timeline|length }} events</p>{% endif %}
+    {% else %}
+    <p style="color:#8b949e;padding:12px 0">No state changes recorded yet today.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="footer">Braider 2 · braider2.local:5000/floor · Refreshes every 60s · Noble Gas Systems</div>
+</body>
+</html>"""
+
+
+@app.route('/floor')
+def floor_report():
+    d = get_floor_report_data()
+    from flask import render_template_string
+    return render_template_string(FLOOR_HTML, d=d)
 
 # ── Sleep prevention ─────────────────────────────────────────────────────────
 
