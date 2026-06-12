@@ -2062,7 +2062,7 @@ tr:hover td { background:#161b22; }
 </div>
 
 <!-- ── Utilization Pie Charts ── -->
-<div class="two-col" style="margin-bottom:28px;">
+<div class="two-col" style="margin-bottom:16px;">
   <div class="section">
     <div class="section-title">Today's Utilization — Midnight to Now</div>
     <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
@@ -2077,13 +2077,13 @@ tr:hover td { background:#161b22; }
       <div id="weekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
     </div>
   </div>
+</div>
 
-  <div class="section">
-    <div class="section-title">Last Week's Utilization — Mon to Sun</div>
-    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
-      <canvas id="lastWeekPie" width="160" height="160" style="flex-shrink:0;"></canvas>
-      <div id="lastWeekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
-    </div>
+<div class="section" style="margin-bottom:28px;">
+  <div class="section-title">Last Week's Utilization — Mon to Sun</div>
+  <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
+    <canvas id="lastWeekPie" width="200" height="200" style="flex-shrink:0;"></canvas>
+    <div id="lastWeekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
   </div>
 </div>
 
