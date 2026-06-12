@@ -1619,75 +1619,91 @@ tr:hover td { background:#161b22; }
   </div>
 </div>
 
-<!-- ── Speed & State Chart ── -->
+<!-- ── State Timeline Charts ── -->
 <div class="section" style="margin-top:8px;">
-  <div class="section-title">Today's Speed & State Overview</div>
-  <div id="speedChart" style="width:100%;height:380px;"></div>
+  <div class="section-title">Today — Machine State Timeline</div>
+  <div id="todayChart" style="width:100%;height:220px;"></div>
+</div>
+
+<div class="section" style="margin-top:8px;">
+  <div class="section-title">This Week — Machine State Timeline</div>
+  <div id="weekChart" style="width:100%;height:220px;"></div>
 </div>
 
 <div class="footer">Braider 2 · braider2.local:5000/floor · Refreshes every 60s · Noble Gas Systems</div>
 
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script>
-(async function() {
-    const STATE_COLORS = {
-        'RUNNING':'#66bb6a','OFF':'#78909c','STOPPED':'#ef5350',
-        'READY':'#4fc3f7','STARTING':'#26c6da','STOPPING':'#ff7043',
-        'PAUSING':'#ffb74d','PAUSED':'#ffa726','ABORTING':'#ab47bc','ABORTED':'#b71c1c'
+const STATE_COLORS = {
+    'RUNNING':'#66bb6a','STOPPED':'#ef5350','OFF':'#455a64',
+    'READY':'#4fc3f7','STARTING':'#26c6da','STOPPING':'#ff7043',
+    'PAUSING':'#ffb74d','PAUSED':'#ffa726','ABORTING':'#ab47bc','ABORTED':'#b71c1c'
+};
+
+function buildStateChart(divId, data, title) {
+    if (!data.timestamps || !data.timestamps.length) {
+        document.getElementById(divId).innerHTML =
+            '<p style="color:#8b949e;padding:20px">No data yet — chart populates during production.</p>';
+        return;
+    }
+    const ts     = data.timestamps;
+    const states = data.states;
+    const traces = [];
+    const seen   = {};
+
+    for (let i = 0; i < ts.length; i++) {
+        const s = states[i];
+        if (!s) continue;
+        if (!seen[s]) seen[s] = true;
+        traces.push({s, t: ts[i]});
+    }
+
+    // One trace per state — scatter markers
+    const byState = {};
+    for (const pt of traces) {
+        if (!byState[pt.s]) byState[pt.s] = [];
+        byState[pt.s].push(pt.t);
+    }
+
+    const plotTraces = Object.entries(byState).map(([state, times]) => ({
+        x: times,
+        y: Array(times.length).fill(state),
+        mode: 'markers',
+        name: state,
+        marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
+        type: 'scatter'
+    }));
+
+    const layout = {
+        paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
+        font:{color:'#8b949e', size:11},
+        margin:{t:10, r:20, b:40, l:80},
+        height:220,
+        showlegend:true,
+        legend:{orientation:'h', y:-0.2, font:{size:10}},
+        xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
+        yaxis:{gridcolor:'#21262d', tickfont:{size:11}, categoryorder:'array',
+               categoryarray:['ABORTED','ABORTING','STOPPING','PAUSED','PAUSING','STOPPED','OFF','READY','STARTING','RUNNING']},
     };
+
+    Plotly.newPlot(divId, plotTraces, layout, {responsive:true, displayModeBar:false});
+}
+
+(async function() {
     try {
-        const res  = await fetch('/api/floor_data');
-        const data = await res.json();
-        if (!data.timestamps || !data.timestamps.length) return;
-
-        const ts    = data.timestamps;
-        const tspd  = data.table_speed;
-        const pspd  = data.puller_speed;
-        const ratio = data.speed_ratio;
-        const states= data.states;
-
-        // Background shapes for state periods
-        const shapes = [];
-        let lastState = states[0], startIdx = 0;
-        for (let i = 1; i <= states.length; i++) {
-            const s = states[i] || '';
-            if (s !== lastState || i === states.length) {
-                shapes.push({
-                    type:'rect', xref:'x', yref:'paper',
-                    x0: ts[startIdx], x1: ts[i-1] || ts[ts.length-1],
-                    y0:0, y1:1,
-                    fillcolor: STATE_COLORS[lastState] || '#333',
-                    opacity: 0.12, line:{width:0}
-                });
-                lastState = s; startIdx = i;
-            }
-        }
-
-        const traces = [
-            {x:ts, y:tspd,  name:'Table Speed',  yaxis:'y1', line:{color:'#4fc3f7',width:1.5}, type:'scatter', mode:'lines'},
-            {x:ts, y:pspd,  name:'Puller Speed', yaxis:'y2', line:{color:'#81c784',width:1.5}, type:'scatter', mode:'lines'},
-            {x:ts, y:ratio, name:'Speed Ratio',  yaxis:'y3', line:{color:'#ffb74d',width:1.5}, type:'scatter', mode:'lines'},
-        ];
-
-        const layout = {
-            paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
-            font:{color:'#8b949e', size:11},
-            margin:{t:10,r:60,b:40,l:55},
-            height:380,
-            showlegend:true,
-            legend:{orientation:'h', y:-0.12, font:{size:11}},
-            shapes:shapes,
-            xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
-            yaxis: {title:'Table (rev/s)', titlefont:{color:'#4fc3f7'}, tickfont:{color:'#4fc3f7'}, gridcolor:'#21262d', domain:[0.68,1]},
-            yaxis2:{title:'Puller (in/s)',  titlefont:{color:'#81c784'}, tickfont:{color:'#81c784'}, gridcolor:'#21262d', domain:[0.34,0.64], anchor:'x'},
-            yaxis3:{title:'Ratio',          titlefont:{color:'#ffb74d'}, tickfont:{color:'#ffb74d'}, gridcolor:'#21262d', domain:[0,0.30],   anchor:'x'},
-            grid:{rows:3, columns:1, subplots:[['xy'],['xy2'],['xy3']]},
-        };
-
-        Plotly.newPlot('speedChart', traces, layout, {responsive:true, displayModeBar:false});
+        const [todayRes, weekRes] = await Promise.all([
+            fetch('/api/floor_data?range=today'),
+            fetch('/api/floor_data?range=week'),
+        ]);
+        const todayData = await todayRes.json();
+        const weekData  = await weekRes.json();
+        buildStateChart('todayChart', todayData, 'Today');
+        buildStateChart('weekChart',  weekData,  'This Week');
     } catch(e) {
-        document.getElementById('speedChart').innerHTML =
-            '<p style="color:#8b949e;padding:20px">Chart data unavailable — data loads after the first production cycle.</p>';
+        ['todayChart','weekChart'].forEach(id => {
+            document.getElementById(id).innerHTML =
+                '<p style="color:#8b949e;padding:20px">Chart unavailable.</p>';
+        });
     }
 })();
 </script>
@@ -1698,27 +1714,35 @@ tr:hover td { background:#161b22; }
 @app.route('/api/floor_data')
 def api_floor_data():
     import csv as csv_mod
-    from datetime import date
-    today_str = date.today().isoformat()
+    from datetime import date, timedelta
+    from flask import request as freq
+    range_param = freq.args.get('range', 'today')
+    today = date.today()
+    if range_param == 'week':
+        cutoff = (today - timedelta(days=6)).isoformat()
+        def row_matches(ts): return ts >= cutoff
+    else:
+        today_str = today.isoformat()
+        def row_matches(ts): return ts.startswith(today_str)
+
     timestamps, table_speed, puller_speed, speed_ratio, states = [], [], [], [], []
     if os.path.exists(PROCESS_LOG):
         try:
             with open(PROCESS_LOG, newline='', encoding='utf-8', errors='replace') as f:
                 all_rows = list(csv_mod.DictReader(f))
-            for row in reversed(all_rows):
-                if row.get('Timestamp', '').startswith(today_str):
-                    timestamps.append(row.get('Timestamp', ''))
-                    try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
-                    except: table_speed.append(0)
-                    try: puller_speed.append(float(row.get('Puller_Speed', 0) or 0))
-                    except: puller_speed.append(0)
-                    try: speed_ratio.append(float(row.get('Speed_Ratio') or 0) or None)
-                    except: speed_ratio.append(None)
-                    states.append(row.get('State_Name', '') or '')
-                elif timestamps:
-                    break
-            timestamps.reverse(); table_speed.reverse()
-            puller_speed.reverse(); speed_ratio.reverse(); states.reverse()
+            # For week view subsample to every 10th row to keep response small
+            step = 10 if range_param == 'week' else 1
+            matching = [r for r in all_rows if row_matches(r.get('Timestamp',''))]
+            matching = matching[::step]
+            for row in matching:
+                timestamps.append(row.get('Timestamp', ''))
+                try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
+                except: table_speed.append(0)
+                try: puller_speed.append(float(row.get('Puller_Speed', 0) or 0))
+                except: puller_speed.append(0)
+                try: speed_ratio.append(float(row.get('Speed_Ratio') or 0) or None)
+                except: speed_ratio.append(None)
+                states.append(row.get('State_Name', '') or '')
         except Exception:
             pass
     return jsonify({'timestamps': timestamps, 'table_speed': table_speed,
