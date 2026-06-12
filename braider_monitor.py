@@ -1896,21 +1896,18 @@ def api_floor_data():
             deduped.append(r)
     all_rows = deduped
 
-    if all_rows:
-        # For week view subsample to every 10th row to keep response small
-        step = 10 if range_param == 'week' else 1
-        matching = all_rows[::step]
-        for row in matching:
-                timestamps.append(row.get('Timestamp', ''))
-                try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
-                except: table_speed.append(0)
-                try: puller_speed.append(float(row.get('Puller_Speed', 0) or 0))
-                except: puller_speed.append(0)
-                try: speed_ratio.append(float(row.get('Speed_Ratio') or 0) or None)
-                except: speed_ratio.append(None)
-                states.append(row.get('State_Name', '') or '')
-        except Exception:
-            pass
+    # For week view subsample to every 10th row to keep response small
+    step = 10 if range_param == 'week' else 1
+    matching = all_rows[::step]
+    for row in matching:
+        timestamps.append(row.get('Timestamp', ''))
+        try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
+        except: table_speed.append(0)
+        try: puller_speed.append(float(row.get('Puller_Speed', 0) or 0))
+        except: puller_speed.append(0)
+        try: speed_ratio.append(float(row.get('Speed_Ratio') or 0) or None)
+        except: speed_ratio.append(None)
+        states.append(row.get('State_Name', '') or '')
     return jsonify({'timestamps': timestamps, 'table_speed': table_speed,
                     'puller_speed': puller_speed, 'speed_ratio': speed_ratio,
                     'states': states})
