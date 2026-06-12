@@ -306,6 +306,26 @@ def calculate_daily_state_percentages():
     if total_rows == 0:
         return {}
 
+    # Also check archived files from today (handles mid-shift restarts)
+    import glob
+    today_compact = datetime.now().strftime('%Y%m%d')
+    base = PROCESS_LOG.replace('.csv', '')
+    for archive in sorted(glob.glob(base + '_archived_' + today_compact + '*.csv')):
+        try:
+            with open(archive, newline='', encoding='utf-8', errors='replace') as af:
+                import csv as _csv
+                for row in _csv.DictReader(af):
+                    ts = row.get('Timestamp', '')
+                    if ts.startswith(today_str):
+                        state = row.get('State_Name', 'UNKNOWN') or 'UNKNOWN'
+                        state_counts[state] = state_counts.get(state, 0) + 1
+                        total_rows += 1
+        except Exception:
+            pass
+
+    if total_rows == 0:
+        return {}
+
     # Convert counts to exact percentages
     return {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
 
@@ -1318,21 +1338,44 @@ def get_floor_report_data():
 
     def read_today_rows(filepath, today):
         rows = []
-        if not os.path.exists(filepath):
-            return rows
-        try:
-            with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
-                all_rows = list(csv_mod.DictReader(f))
-            for row in reversed(all_rows):
-                ts = row.get('Timestamp', '')
-                if ts.startswith(today):
-                    rows.append(row)
-                elif rows:
-                    break
-            rows.reverse()
-        except Exception:
-            pass
-        return rows
+        # Read from live file
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
+                    all_rows = list(csv_mod.DictReader(f))
+                for row in reversed(all_rows):
+                    ts = row.get('Timestamp', '')
+                    if ts.startswith(today):
+                        rows.append(row)
+                    elif rows:
+                        break
+                rows.reverse()
+            except Exception:
+                pass
+
+        # Also check archived files from today — covers restarts mid-shift
+        import glob, re
+        base = filepath.replace('.csv', '')
+        pattern = base + '_archived_' + today.replace('-', '') + '*.csv'
+        for archive in sorted(glob.glob(pattern)):
+            try:
+                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                    archive_rows = [r for r in csv_mod.DictReader(f)
+                                    if r.get('Timestamp', '').startswith(today)]
+                # Prepend archive rows — they come before live rows
+                rows = archive_rows + rows
+            except Exception:
+                pass
+
+        # Deduplicate by timestamp, keep order
+        seen = set()
+        deduped = []
+        for row in rows:
+            ts = row.get('Timestamp', '')
+            if ts not in seen:
+                seen.add(ts)
+                deduped.append(row)
+        return deduped
 
     def read_day_rows(filepath, day):
         rows = []
@@ -1811,15 +1854,53 @@ def api_floor_data():
         def row_matches(ts): return ts.startswith(today_str)
 
     timestamps, table_speed, puller_speed, speed_ratio, states = [], [], [], [], []
+    import glob
+    all_rows = []
+    # Include archived files that match the date range
+    base = PROCESS_LOG.replace('.csv', '')
+    if range_param == 'week':
+        # Grab up to 7 days of archives
+        from datetime import date as _date, timedelta as _td
+        for i in range(7):
+            d = (_date.today() - _td(days=i)).strftime('%Y%m%d')
+            for archive in glob.glob(base + '_archived_' + d + '*.csv'):
+                try:
+                    with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                        all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
+                except Exception:
+                    pass
+    else:
+        # Today — check archives from today
+        today_compact = date.today().strftime('%Y%m%d')
+        for archive in glob.glob(base + '_archived_' + today_compact + '*.csv'):
+            try:
+                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                    all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
+            except Exception:
+                pass
+
     if os.path.exists(PROCESS_LOG):
         try:
             with open(PROCESS_LOG, newline='', encoding='utf-8', errors='replace') as f:
-                all_rows = list(csv_mod.DictReader(f))
-            # For week view subsample to every 10th row to keep response small
-            step = 10 if range_param == 'week' else 1
-            matching = [r for r in all_rows if row_matches(r.get('Timestamp',''))]
-            matching = matching[::step]
-            for row in matching:
+                all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
+        except Exception:
+            pass
+
+    # Sort by timestamp and deduplicate
+    seen_ts = set()
+    deduped = []
+    for r in sorted(all_rows, key=lambda x: x.get('Timestamp','')):
+        ts = r.get('Timestamp','')
+        if ts not in seen_ts:
+            seen_ts.add(ts)
+            deduped.append(r)
+    all_rows = deduped
+
+    if all_rows:
+        # For week view subsample to every 10th row to keep response small
+        step = 10 if range_param == 'week' else 1
+        matching = all_rows[::step]
+        for row in matching:
                 timestamps.append(row.get('Timestamp', ''))
                 try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
                 except: table_speed.append(0)
