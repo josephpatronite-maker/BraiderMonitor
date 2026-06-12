@@ -2062,40 +2062,48 @@ tr:hover td { background:#161b22; }
 </div>
 
 <!-- ── Utilization Pie Charts ── -->
-<div class="two-col" style="margin-bottom:16px;">
-  <div class="section">
-    <div class="section-title">Today's Utilization — Midnight to Now</div>
-    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
-      <canvas id="todayPie" width="160" height="160" style="flex-shrink:0;"></canvas>
-      <div id="todayPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-title">This Week's Utilization — Mon to Now</div>
-    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
-      <canvas id="weekPie" width="160" height="160" style="flex-shrink:0;"></canvas>
-      <div id="weekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
-    </div>
-  </div>
-</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:28px;">
 
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:28px;width:100%;">
-  <div class="section-title">Last Week's Utilization — Mon to Sun</div>
-  <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
-    <canvas id="lastWeekPie" width="200" height="200" style="flex-shrink:0;"></canvas>
-    <div id="lastWeekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">Today — Midnight to Now</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="todayPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="todayPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
   </div>
+
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">This Week — Mon to Now</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="weekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="weekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
+  </div>
+
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">Last Week — Mon to Sun</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="lastWeekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="lastWeekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
+  </div>
+
 </div>
 
 <!-- ── State Timeline Charts ── -->
 <div class="section" style="margin-top:8px;">
   <div class="section-title">Today — Machine State Timeline</div>
-  <div id="todayChart" style="width:100%;height:220px;"></div>
+  <div id="todayChart" style="width:100%;height:200px;"></div>
 </div>
 
 <div class="section" style="margin-top:8px;">
   <div class="section-title">This Week — Machine State Timeline</div>
-  <div id="weekChart" style="width:100%;height:220px;"></div>
+  <div id="weekChart" style="width:100%;height:200px;"></div>
+</div>
+
+<div class="section" style="margin-top:8px;">
+  <div class="section-title">Last Week — Machine State Timeline</div>
+  <div id="lastWeekChart" style="width:100%;height:200px;"></div>
 </div>
 
 <div class="footer">Braider 2 · braider2.local:5000/floor · Refreshes every 60s · Noble Gas Systems</div>
@@ -2231,8 +2239,9 @@ function drawPie(canvasId, legendId, data) {
         drawPie('todayPie',    'todayPieLegend',    todayData);
         drawPie('weekPie',     'weekPieLegend',     weekData);
         drawPie('lastWeekPie', 'lastWeekPieLegend', lastWeekData);
-        buildStateChart('todayChart', todayData, 'Today');
-        buildStateChart('weekChart',  weekData,  'This Week');
+        buildStateChart('todayChart',    todayData,    'Today');
+        buildStateChart('weekChart',     weekData,     'This Week');
+        buildStateChart('lastWeekChart', lastWeekData, 'Last Week');
     } catch(e) {
         ['todayChart','weekChart'].forEach(id => {
             document.getElementById(id).innerHTML =
