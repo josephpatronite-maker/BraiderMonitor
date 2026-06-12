@@ -2079,7 +2079,7 @@ tr:hover td { background:#161b22; }
   </div>
 </div>
 
-<div class="section" style="margin-bottom:28px;">
+<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:28px;width:100%;">
   <div class="section-title">Last Week's Utilization — Mon to Sun</div>
   <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
     <canvas id="lastWeekPie" width="200" height="200" style="flex-shrink:0;"></canvas>
