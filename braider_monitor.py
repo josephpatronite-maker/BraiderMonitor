@@ -2045,7 +2045,7 @@ tr:hover td { background:#161b22; }
 
 </div>
 
-<div class="two-col">
+<div>
   <div class="section">
     <div class="section-title">Bobbin Changeovers Today ({{ d.changeovers|length }})</div>
     {% if d.changeovers %}
@@ -2070,31 +2070,7 @@ tr:hover td { background:#161b22; }
     {% endif %}
   </div>
 
-  <div class="section">
-    <div class="section-title">State Timeline ({{ d.timeline|length }} events)</div>
-    {% if d.timeline %}
-    <ul class="timeline">
-    {% for t in d.timeline[-30:] | reverse %}
-      <li>
-        <span class="tl-time">{{ t.time[11:] }}</span>
-        {% if t.from_state == 'WIRE BREAK' %}
-          <span class="badge badge-break">⚡ WIRE BREAK</span>
-        {% else %}
-          {% set fs = t.from_state|upper %}
-          {% set ts2 = t.to_state|upper %}
-          <span class="badge {% if fs=='RUNNING' %}badge-running{% elif fs=='OFF' %}badge-off{% elif fs in ('STOPPED','ABORTED','ABORTING') %}badge-stopped{% elif fs in ('STARTING','STOPPING') %}badge-starting{% else %}badge-other{% endif %}">{{ fs }}</span>
-          <span style="color:#30363d">→</span>
-          <span class="badge {% if ts2=='RUNNING' %}badge-running{% elif ts2=='OFF' %}badge-off{% elif ts2 in ('STOPPED','ABORTED','ABORTING') %}badge-stopped{% elif ts2 in ('STARTING','STOPPING') %}badge-starting{% else %}badge-other{% endif %}">{{ ts2 }}</span>
-        {% endif %}
-        {% if t.feet %}<span class="tl-feet">{{ t.feet|float|round(1) }} ft</span>{% endif %}
-      </li>
-    {% endfor %}
-    </ul>
-    {% if d.timeline|length > 30 %}<p style="color:#8b949e;font-size:.8rem;margin-top:8px">Showing last 30 of {{ d.timeline|length }} events</p>{% endif %}
-    {% else %}
-    <p style="color:#8b949e;padding:12px 0">No state changes recorded yet today.</p>
-    {% endif %}
-  </div>
+
 </div>
 
 <!-- ── Utilization Pie Charts ── -->
