@@ -1994,19 +1994,7 @@ tr:hover td { background:#161b22; }
 
 <div class="scorecard">
 
-  {% set v_color = 'green' if d.vessels >= d.vessel_target else ('yellow' if d.vessels >= d.vessel_target - 1 else 'red') %}
-  <div class="card {{ v_color }}">
-    <div class="card-label">Vessels Today</div>
-    <div class="card-value" style="color:{% if v_color=='green' %}#3fb950{% elif v_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.vessels }}</div>
-    <div class="card-sub">Target: {{ d.vessel_target }}</div>
-    {% if d.yest_vessels is not none %}
-    <div class="card-vs">
-      {% if d.vessels > d.yest_vessels %}<span class="up">▲ {{ d.vessels - d.yest_vessels }} vs yesterday</span>
-      {% elif d.vessels < d.yest_vessels %}<span class="down">▼ {{ d.yest_vessels - d.vessels }} vs yesterday</span>
-      {% else %}<span class="same">= same as yesterday</span>{% endif %}
-    </div>{% endif %}
-    <div class="bar-wrap"><div class="bar-fill bar-{{ v_color }}" style="width:{{ [100,(d.vessels/d.vessel_target*100)|int]|min }}%"></div></div>
-  </div>
+
 
   {% set r_color = 'green' if d.running_pct >= d.running_target_pct else ('yellow' if d.running_pct >= d.running_target_pct - 10 else 'red') %}
   <div class="card {{ r_color }}">
@@ -2087,6 +2075,14 @@ tr:hover td { background:#161b22; }
     <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
       <canvas id="weekPie" width="160" height="160" style="flex-shrink:0;"></canvas>
       <div id="weekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Last Week's Utilization — Mon to Sun</div>
+    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
+      <canvas id="lastWeekPie" width="160" height="160" style="flex-shrink:0;"></canvas>
+      <div id="lastWeekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
     </div>
   </div>
 </div>
@@ -2224,14 +2220,17 @@ function drawPie(canvasId, legendId, data) {
 
 (async function() {
     try {
-        const [todayRes, weekRes] = await Promise.all([
+        const [todayRes, weekRes, lastWeekRes] = await Promise.all([
             fetch('/api/floor_data?range=today'),
             fetch('/api/floor_data?range=week'),
+            fetch('/api/floor_data?range=lastweek'),
         ]);
-        const todayData = await todayRes.json();
-        const weekData  = await weekRes.json();
-        drawPie('todayPie', 'todayPieLegend', todayData);
-        drawPie('weekPie',  'weekPieLegend',  weekData);
+        const todayData    = await todayRes.json();
+        const weekData     = await weekRes.json();
+        const lastWeekData = await lastWeekRes.json();
+        drawPie('todayPie',    'todayPieLegend',    todayData);
+        drawPie('weekPie',     'weekPieLegend',     weekData);
+        drawPie('lastWeekPie', 'lastWeekPieLegend', lastWeekData);
         buildStateChart('todayChart', todayData, 'Today');
         buildStateChart('weekChart',  weekData,  'This Week');
     } catch(e) {
@@ -2255,10 +2254,19 @@ def api_floor_data():
     today = date.today()
     if range_param == 'week':
         # Monday midnight of current week
-        days_since_monday = today.weekday()  # 0=Mon, 6=Sun
+        days_since_monday = today.weekday()
         monday = today - timedelta(days=days_since_monday)
         cutoff = monday.isoformat()
         def row_matches(ts): return ts >= cutoff
+    elif range_param == 'lastweek':
+        # Last Monday to last Sunday
+        days_since_monday = today.weekday()
+        this_monday  = today - timedelta(days=days_since_monday)
+        last_monday  = this_monday - timedelta(days=7)
+        last_sunday  = this_monday - timedelta(days=1)
+        cutoff_start = last_monday.isoformat()
+        cutoff_end   = last_sunday.isoformat() + 'T23:59:59'
+        def row_matches(ts): return cutoff_start <= ts <= cutoff_end
     else:
         # Today midnight to now
         today_str = today.isoformat()
