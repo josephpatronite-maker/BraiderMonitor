@@ -123,7 +123,7 @@ FAST_TAGS = [
     # Wire break recovery
     'WireBreak_Move',           # Distance machine backed up after wire break
     'EStop_Recover',            # E-stop recovery sequence active
-    # Servo axis sub-tags — velocity diagnostics
+    # Servo axis sub-tags
     'servoPuller_Axis.ActualVelocity',
     'servoPuller_Axis.ActualAcceleration',
     'servoPuller_Axis.VelocityError',
@@ -135,6 +135,23 @@ FAST_TAGS = [
     'servoTable_Axis.MotionStatus',
     'servoBraider_Group.GroupStatus',
     'servoBraider_Group.GroupFault',
+    # Program-scoped tags — high value
+    'Program:P01_TableDrive.Ave_Current_Data',      # Average table drive current — motor load
+    'Program:P01_TableDrive.Abs_Value_Peak',        # Peak current sample
+    'Program:P01_TableDrive.Servo_Axis_Faults',     # Servo fault code
+    'Program:P01_TableDrive.Table_Speed_Temp',      # Speed during transitions
+    'Program:MainProgram.Fault_WireBreak',          # Wire break fault flag
+    'Program:MainProgram.Fault_EStop',              # E-stop fault flag
+    'Program:MainProgram.Fault_GuardDoor',          # Guard door fault flag
+    'Program:MainProgram.Fault_PullerServo',        # Puller servo fault flag
+    'Program:MainProgram.Fault_TableServo',         # Table servo fault flag
+    'Program:MainProgram.Fault_StartingTimeout',    # Starting timeout fault flag
+    'Program:MainProgram.Fault_SERCOS',             # Servo comms fault
+    'Program:MainProgram.Table_Drive_Fault',        # Table drive fault
+    'Program:MainProgram.Puller_Current_Dist',      # Puller distance this segment
+    'Program:MainProgram.Table_Current_Dist',       # Table distance this segment
+    'Program:MainProgram.Recover_Step',             # Wire break recovery step
+    'Program:MainProgram.StateMirror',              # Machine state mirror
 ]
 
 # 60s poll — OEE accumulators + recipe
@@ -545,6 +562,23 @@ def monitor_loop():
                     'Table_MotionStatus':    d.get('servoTable_Axis.MotionStatus'),
                     'Group_Status':          d.get('servoBraider_Group.GroupStatus'),
                     'Group_Fault':           d.get('servoBraider_Group.GroupFault'),
+                    # Program-scoped tags
+                    'Ave_Current_Data':      d.get('Program:P01_TableDrive.Ave_Current_Data'),
+                    'Abs_Value_Peak':        d.get('Program:P01_TableDrive.Abs_Value_Peak'),
+                    'Servo_Axis_Faults':     d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
+                    'Table_Speed_Temp':      d.get('Program:P01_TableDrive.Table_Speed_Temp'),
+                    'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
+                    'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
+                    'Fault_GuardDoor':       d.get('Program:MainProgram.Fault_GuardDoor'),
+                    'Fault_PullerServo':     d.get('Program:MainProgram.Fault_PullerServo'),
+                    'Fault_TableServo':      d.get('Program:MainProgram.Fault_TableServo'),
+                    'Fault_StartingTimeout': d.get('Program:MainProgram.Fault_StartingTimeout'),
+                    'Fault_SERCOS':          d.get('Program:MainProgram.Fault_SERCOS'),
+                    'Table_Drive_Fault':     d.get('Program:MainProgram.Table_Drive_Fault'),
+                    'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
+                    'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
+                    'Recover_Step':          d.get('Program:MainProgram.Recover_Step'),
+                    'StateMirror':           d.get('Program:MainProgram.StateMirror'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
@@ -715,17 +749,26 @@ def monitor_loop():
                             'new_part':           d.get('New_Part_Latch'),
                             'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
                             'estop_recover':      d.get('EStop_Recover'),
-                            'puller_actual_vel':  d.get('servoPuller_Axis.ActualVelocity'),
-                            'puller_actual_accel':d.get('servoPuller_Axis.ActualAcceleration'),
-                            'puller_vel_error':   d.get('servoPuller_Axis.VelocityError'),
-                            'puller_cmd_vel':     d.get('servoPuller_Axis.CommandVelocity'),
+                            'puller_actual_vel':   d.get('servoPuller_Axis.ActualVelocity'),
+                            'puller_actual_accel': d.get('servoPuller_Axis.ActualAcceleration'),
+                            'puller_vel_error':    d.get('servoPuller_Axis.VelocityError'),
+                            'puller_cmd_vel':      d.get('servoPuller_Axis.CommandVelocity'),
                             'puller_motion_status':d.get('servoPuller_Axis.MotionStatus'),
-                            'table_actual_vel':   d.get('servoTable_Axis.ActualVelocity'),
-                            'table_actual_accel': d.get('servoTable_Axis.ActualAcceleration'),
-                            'table_vel_error':    d.get('servoTable_Axis.VelocityError'),
-                            'table_motion_status':d.get('servoTable_Axis.MotionStatus'),
-                            'group_status':       d.get('servoBraider_Group.GroupStatus'),
-                            'group_fault':        d.get('servoBraider_Group.GroupFault'),
+                            'table_actual_vel':    d.get('servoTable_Axis.ActualVelocity'),
+                            'table_actual_accel':  d.get('servoTable_Axis.ActualAcceleration'),
+                            'table_vel_error':     d.get('servoTable_Axis.VelocityError'),
+                            'table_motion_status': d.get('servoTable_Axis.MotionStatus'),
+                            'group_status':        d.get('servoBraider_Group.GroupStatus'),
+                            'group_fault':         d.get('servoBraider_Group.GroupFault'),
+                            'ave_current_data':    d.get('Program:P01_TableDrive.Ave_Current_Data'),
+                            'abs_value_peak':      d.get('Program:P01_TableDrive.Abs_Value_Peak'),
+                            'servo_axis_faults':   d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
+                            'fault_wire_break':    d.get('Program:MainProgram.Fault_WireBreak'),
+                            'fault_estop':         d.get('Program:MainProgram.Fault_EStop'),
+                            'fault_guard_door':    d.get('Program:MainProgram.Fault_GuardDoor'),
+                            'recover_step':        d.get('Program:MainProgram.Recover_Step'),
+                            'puller_current_dist': d.get('Program:MainProgram.Puller_Current_Dist'),
+                            'table_current_dist':  d.get('Program:MainProgram.Table_Current_Dist'),
                             'connected':          True,
                             'daily_state_pcts':   calculate_daily_state_percentages(),
                         })
