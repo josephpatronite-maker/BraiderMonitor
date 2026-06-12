@@ -480,10 +480,9 @@ def monitor_loop():
                         if isinstance(recipe_raw, dict):
                             recipe_name     = recipe_raw.get('Name', 'Unknown')
 
-                            # PPI selection — Body_PPI from recipe struct is the correct value
-                            # Hi/Low PPI tags are only used in mandrel mode
+                            # PPI selection — use active segment's Picks value for live PPI
+                            # Falls back to Connector_PPI then Body_PPI if segment data unavailable
                             mandrel_mode_val = od.get('HMI_Mandrel_Mode')
-                            body_ppi   = recipe_raw.get('Body_PPI')
                             hi_ppi     = od.get('Hi_PPI')
                             low_ppi    = od.get('Low_PPI')
                             hi_running = od.get('Hi_PPI_Running')
@@ -495,10 +494,17 @@ def monitor_loop():
                                 elif low_ppi is not None:
                                     recipe_ppi = low_ppi
                                 else:
-                                    recipe_ppi = body_ppi
+                                    recipe_ppi = recipe_raw.get('Connector_PPI')
                             else:
-                                # Standard mode — Body_PPI from recipe struct is correct
-                                recipe_ppi = body_ppi
+                                # Standard mode — read live PPI from active segment Picks
+                                try:
+                                    segments   = recipe_raw.get('Segments', [])
+                                    active_seg = _latest.get('active_segment') or 1
+                                    seg_data   = segments[int(active_seg)] if segments else None
+                                    seg_picks  = seg_data.get('Picks') if seg_data else None
+                                    recipe_ppi = seg_picks if seg_picks else recipe_raw.get('Connector_PPI')
+                                except Exception:
+                                    recipe_ppi = recipe_raw.get('Connector_PPI')
                             
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
