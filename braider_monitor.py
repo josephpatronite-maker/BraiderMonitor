@@ -913,7 +913,7 @@ DASHBOARD_HTML = """
             <div class="value" style="font-size:22px">
                 <span id="taper-value">{% if d.taper_sensor %}{{ "%.2f"|format(d.taper_sensor) }}{% else %}—{% endif %}</span>
             </div>
-            <div class="unit">raw units — units TBD</div>
+            <div class="unit" id="taper-unit">{% if d.sensor_mode %}sensor active{% else %}sensor off{% endif %} — units TBD</div>
         </div>
 
         <div class="card">
@@ -1192,7 +1192,19 @@ async function fetchAndUpdate() {
         upd('table-rpm-value', ts ? (ts * 60).toFixed(1) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
-        upd('taper-value',  data.taper_sensor !== null && data.taper_sensor !== undefined ? data.taper_sensor.toFixed(2) : '—');
+        // Taper sensor — show — when 0 (sensor not active) or null
+        const taperEl = document.getElementById('taper-value');
+        if (taperEl) {
+            if (data.taper_sensor !== null && data.taper_sensor !== undefined && data.taper_sensor > 0) {
+                taperEl.textContent = data.taper_sensor.toFixed(2);
+            } else {
+                taperEl.textContent = '—';
+            }
+        }
+        const taperUnit = document.getElementById('taper-unit');
+        if (taperUnit) {
+            taperUnit.textContent = (data.sensor_mode ? 'sensor active' : 'sensor off') + ' — units TBD';
+        }
         upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
         upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
         upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
