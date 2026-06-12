@@ -1833,13 +1833,27 @@ def get_floor_report_data():
     off_rows     = state_counts.get('OFF', 0)
     stopped_rows = state_counts.get('STOPPED', 0)
 
-    # Vessels completed — RUNNING → OFF or STOPPED transition
+    # Vessels completed — RUNNING → OFF or STOPPED transition with min 25ft threshold
     vessels = 0
     prev_state = None
+    run_start_feet = None
+    VESSEL_MIN_FEET = 25.0
+
     for row in proc_rows:
-        s = row.get('State_Name', '')
-        if prev_state == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
-            vessels += 1
+        s  = row.get('State_Name', '')
+        try:
+            feet = float(row.get('Puller_Pos_Feet') or 0)
+        except:
+            feet = 0.0
+
+        if s == 'RUNNING' and prev_state != 'RUNNING':
+            run_start_feet = feet
+        elif prev_state == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
+            if run_start_feet is not None:
+                feet_produced = abs(feet - run_start_feet)
+                if feet_produced >= VESSEL_MIN_FEET:
+                    vessels += 1
+            run_start_feet = None
         prev_state = s
 
     # Bobbin changeovers — OFF state durations > 5 min
@@ -2027,12 +2041,7 @@ tr:hover td { background:#161b22; }
     <div class="card-sub">{% if d.wire_breaks == 0 %}Clean day ✓{% elif d.wire_breaks == 1 %}1 break{% else %}{{ d.wire_breaks }} breaks{% endif %}</div>
   </div>
 
-  {% set s_color = 'green' if d.stopped_pct <= 10 else ('yellow' if d.stopped_pct <= 20 else 'red') %}
-  <div class="card {{ s_color }}">
-    <div class="card-label">Unplanned Stops</div>
-    <div class="card-value" style="color:{% if s_color=='green' %}#3fb950{% elif s_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.stopped_pct }}%</div>
-    <div class="card-sub">of shift in STOPPED state</div>
-  </div>
+
 
 </div>
 
