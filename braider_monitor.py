@@ -1619,6 +1619,24 @@ tr:hover td { background:#161b22; }
   </div>
 </div>
 
+<!-- ── Utilization Pie Charts ── -->
+<div class="two-col" style="margin-bottom:28px;">
+  <div class="section">
+    <div class="section-title">Today's Utilization — Midnight to Now</div>
+    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
+      <canvas id="todayPie" width="160" height="160" style="flex-shrink:0;"></canvas>
+      <div id="todayPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-title">This Week's Utilization — Mon to Now</div>
+    <div style="display:flex;align-items:center;gap:20px;padding:12px 0;">
+      <canvas id="weekPie" width="160" height="160" style="flex-shrink:0;"></canvas>
+      <div id="weekPieLegend" style="font-size:11px;line-height:2;color:#8b949e;"></div>
+    </div>
+  </div>
+</div>
+
 <!-- ── State Timeline Charts ── -->
 <div class="section" style="margin-top:8px;">
   <div class="section-title">Today — Machine State Timeline</div>
@@ -1689,6 +1707,67 @@ function buildStateChart(divId, data, title) {
     Plotly.newPlot(divId, plotTraces, layout, {responsive:true, displayModeBar:false});
 }
 
+function drawPie(canvasId, legendId, data) {
+    const canvas = document.getElementById(canvasId);
+    const legend = document.getElementById(legendId);
+    if (!canvas || !data.states || !data.states.length) return;
+
+    // Count rows per state
+    const counts = {};
+    for (const s of data.states) {
+        if (s) counts[s] = (counts[s] || 0) + 1;
+    }
+    const total = Object.values(counts).reduce((a,b) => a+b, 0);
+    if (!total) return;
+
+    const ORDER = ['RUNNING','OFF','STOPPED','READY','STARTING','STOPPING','PAUSING','PAUSED','ABORTING','ABORTED'];
+    const entries = ORDER.filter(s => counts[s])
+                         .map(s => [s, counts[s]])
+                         .concat(Object.entries(counts).filter(([s]) => !ORDER.includes(s)));
+
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const cx = W/2, cy = H/2, r = Math.min(W,H)/2 - 4;
+    ctx.clearRect(0,0,W,H);
+
+    let angle = -Math.PI/2;
+    let legendHTML = '';
+    for (const [state, count] of entries) {
+        const sweep = (count/total) * Math.PI * 2;
+        const color = STATE_COLORS[state] || '#999';
+        ctx.beginPath();
+        ctx.moveTo(cx,cy);
+        ctx.arc(cx,cy,r,angle,angle+sweep);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#0d1117';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        const pct = (count/total*100).toFixed(1);
+        const hrs = (count*2/3600).toFixed(1);
+        legendHTML += `<div><span style="color:${color};font-weight:700;">■</span> ${state}: ${pct}% (${hrs}h)</div>`;
+        angle += sweep;
+    }
+    // Donut hole
+    ctx.beginPath();
+    ctx.arc(cx,cy,r*0.52,0,Math.PI*2);
+    ctx.fillStyle = '#161b22';
+    ctx.fill();
+    // Center text — running %
+    const runPct = counts['RUNNING'] ? (counts['RUNNING']/total*100).toFixed(0) : '0';
+    ctx.fillStyle = '#3fb950';
+    ctx.font = 'bold 22px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(runPct + '%', cx, cy-8);
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '10px Arial';
+    ctx.fillText('running', cx, cy+12);
+
+    if (legend) legend.innerHTML = legendHTML;
+}
+
 (async function() {
     try {
         const [todayRes, weekRes] = await Promise.all([
@@ -1697,6 +1776,8 @@ function buildStateChart(divId, data, title) {
         ]);
         const todayData = await todayRes.json();
         const weekData  = await weekRes.json();
+        drawPie('todayPie', 'todayPieLegend', todayData);
+        drawPie('weekPie',  'weekPieLegend',  weekData);
         buildStateChart('todayChart', todayData, 'Today');
         buildStateChart('weekChart',  weekData,  'This Week');
     } catch(e) {
@@ -1719,9 +1800,13 @@ def api_floor_data():
     range_param = freq.args.get('range', 'today')
     today = date.today()
     if range_param == 'week':
-        cutoff = (today - timedelta(days=6)).isoformat()
+        # Monday midnight of current week
+        days_since_monday = today.weekday()  # 0=Mon, 6=Sun
+        monday = today - timedelta(days=days_since_monday)
+        cutoff = monday.isoformat()
         def row_matches(ts): return ts >= cutoff
     else:
+        # Today midnight to now
         today_str = today.isoformat()
         def row_matches(ts): return ts.startswith(today_str)
 
