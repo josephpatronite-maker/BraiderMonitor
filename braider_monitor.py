@@ -499,10 +499,10 @@ def monitor_loop():
                                 # Standard mode — read live PPI from active segment Picks
                                 try:
                                     segments   = recipe_raw.get('Segments', [])
-                                    active_seg = _latest.get('active_segment') or 1
+                                    active_seg = d.get('Active_Segment') or 1
                                     seg_data   = segments[int(active_seg)] if segments else None
                                     seg_picks  = seg_data.get('Picks') if seg_data else None
-                                    recipe_ppi = seg_picks if seg_picks else recipe_raw.get('Connector_PPI')
+                                    recipe_ppi = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
                                 except Exception:
                                     recipe_ppi = recipe_raw.get('Connector_PPI')
                             
