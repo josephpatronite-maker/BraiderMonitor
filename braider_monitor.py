@@ -137,6 +137,20 @@ FAST_TAGS = [
     'Program:MainProgram.Puller_Current_Dist',      # Puller distance this segment
     'Program:MainProgram.Table_Current_Dist',       # Table distance this segment
     'Program:MainProgram.StateMirror',              # Machine state mirror
+    # Additional useful tags from full scan analysis
+    'Sequence_Step',                    # Internal state machine step counter
+    'Machine_Msg_Scroll',               # HMI message code cycling
+    'Recover_Position',                 # Position machine backs up to on wire break recovery
+    'Load_New_Cam',                     # Fires when new cam profile loaded (segment transition)
+    'O_Lamp_Green_Machine_Running',     # Physical green lamp — clean running indicator
+    'O_Lamp_Red_Machine_Stopped',       # Physical red lamp — clean stopped indicator
+    'Ok_To_Jog',                        # Jog permission flag
+    'I_Pushbutton_Jog_Table_Fwd',       # Jog forward button
+    'I_Pushbutton_Jog_Table_Rev',       # Jog reverse button
+    'I_Pushbutton_Start',               # Start button
+    'TablePos_EndofSeg',                # Table position at end of current segment
+    'TablePos_EndofLastSeg',            # Table position at end of last segment
+    'Master_No_Motion',                 # Master no-motion flag
 ]
 
 # 60s poll — OEE accumulators + recipe
@@ -390,6 +404,23 @@ _latest = {
     'mandrel_mode':      None,
     # Process
     'taper_sensor':      None,
+    'sequence_step':      None,
+    'recover_position':   None,
+    'lamp_running':       None,
+    'lamp_stopped':       None,
+    'ok_to_jog':          None,
+    'jog_fwd':            None,
+    'jog_rev':            None,
+    'start_pb':           None,
+    'master_no_motion':   None,
+    'machine_msg_scroll': None,
+    'tablepos_endofseg':  None,
+    'tablepos_endoflastseg': None,
+    'puller_vel_cmd_err': None,
+    'puller_servo_ok':    None,
+    'table_servo_ok':     None,
+    'group_fault':        None,
+    'group_status':       None,
     'speed_ratio':       None,
     'table_vel_error':   None,
     'puller_vel_error':  None,
@@ -634,6 +665,32 @@ def monitor_loop():
                     'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
                     'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
                     'StateMirror':           d.get('Program:MainProgram.StateMirror'),
+                    # Additional tags
+                    'Sequence_Step':         d.get('Sequence_Step'),
+                    'Machine_Msg_Scroll':    d.get('Machine_Msg_Scroll'),
+                    'Recover_Position':      d.get('Recover_Position'),
+                    'Load_New_Cam':          d.get('Load_New_Cam'),
+                    'Lamp_Running':          d.get('O_Lamp_Green_Machine_Running'),
+                    'Lamp_Stopped':          d.get('O_Lamp_Red_Machine_Stopped'),
+                    'Ok_To_Jog':             d.get('Ok_To_Jog'),
+                    'Jog_Fwd':               d.get('I_Pushbutton_Jog_Table_Fwd'),
+                    'Jog_Rev':               d.get('I_Pushbutton_Jog_Table_Rev'),
+                    'Start_PB':              d.get('I_Pushbutton_Start'),
+                    'TablePos_EndofSeg':     d.get('TablePos_EndofSeg'),
+                    'TablePos_EndofLastSeg': d.get('TablePos_EndofLastSeg'),
+                    'Master_No_Motion':      d.get('Master_No_Motion'),
+                    # Puller servo velocity error — calculated
+                    'Puller_Vel_Cmd_Err':    (
+                        (d.get('servoPuller_Axis.CommandVelocity') or 0) -
+                        (d.get('servoPuller_Axis.ActualVelocity') or 0)
+                    ) if d.get('servoPuller_Axis.CommandVelocity') is not None else None,
+                    # Servo status
+                    'Puller_Servo_Ok':       d.get('Puller_Servo_Status.Ok'),
+                    'Puller_Servo_State':    d.get('Puller_Servo_Status.State'),
+                    'Table_Servo_Ok':        d.get('Table_Servo_Status.Ok'),
+                    'Table_Servo_State':     d.get('Table_Servo_Status.State'),
+                    'Group_Status':          d.get('servoBraider_Group.GroupStatus'),
+                    'Group_Fault':           d.get('servoBraider_Group.GroupFault'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
@@ -811,6 +868,19 @@ def monitor_loop():
                             'recover_step':        d.get('Program:MainProgram.Recover_Step'),
                             'puller_current_dist': d.get('Program:MainProgram.Puller_Current_Dist'),
                             'table_current_dist':  d.get('Program:MainProgram.Table_Current_Dist'),
+                            'sequence_step':       d.get('Sequence_Step'),
+                            'recover_position':    d.get('Recover_Position'),
+                            'lamp_running':        d.get('O_Lamp_Green_Machine_Running'),
+                            'lamp_stopped':        d.get('O_Lamp_Red_Machine_Stopped'),
+                            'ok_to_jog':           d.get('Ok_To_Jog'),
+                            'jog_fwd':             d.get('I_Pushbutton_Jog_Table_Fwd'),
+                            'jog_rev':             d.get('I_Pushbutton_Jog_Table_Rev'),
+                            'start_pb':            d.get('I_Pushbutton_Start'),
+                            'master_no_motion':    d.get('Master_No_Motion'),
+                            'puller_vel_cmd_err':  (
+                                (d.get('servoPuller_Axis.CommandVelocity') or 0) -
+                                (d.get('servoPuller_Axis.ActualVelocity') or 0)
+                            ) if d.get('servoPuller_Axis.CommandVelocity') is not None else None,
                             'connected':          True,
                             'daily_state_pcts':   calculate_daily_state_percentages(),
                         })
@@ -968,6 +1038,14 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
+            <div class="label">Puller Vel Error</div>
+            <div class="value" style="font-size:22px">
+                <span id="puller-vel-err">{% if d.puller_vel_cmd_err is not none %}{{ '%.5f'|format(d.puller_vel_cmd_err) }}{% else %}—{% endif %}</span>
+            </div>
+            <div class="unit">cmd − actual in/s · tension proxy</div>
+        </div>
+
+        <div class="card">
             <div class="label">VFD — Actual / Command</div>
             <div class="value" style="font-size:18px">
                 <span id="vfd-actual">{{ d.vfd_freq_actual or '—' }}</span> / <span id="vfd-command">{{ d.vfd_freq_command or '—' }}</span>
@@ -1037,6 +1115,115 @@ DASHBOARD_HTML = """
                 {% endfor %}
             </div>
             <div class="unit" style="margin-top:8px">all green = normal</div>
+        </div>
+
+    </div>
+
+    <!-- ── SERVO & MOTION ──────────────────────────────────── -->
+    <div class="section">Servo & Motion</div>
+    <div class="grid">
+
+        <div class="card">
+            <div class="label">Puller Vel Error</div>
+            <div class="value" style="font-size:22px">
+                <span id="puller-vel-err2">{% if d.puller_vel_cmd_err is not none %}{{ '%.5f'|format(d.puller_vel_cmd_err) }}{% else %}—{% endif %}</span>
+            </div>
+            <div class="unit">cmd − actual in/s</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Sequence Step</div>
+            <div class="value" style="font-size:26px">
+                <span id="seq-step">{{ d.sequence_step or '—' }}</span>
+            </div>
+            <div class="unit">internal state machine step</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Servo Health</div>
+            <div class="checks">
+                <span id="servo-puller-ok" class="{{ 'ok' if d.puller_servo_ok else 'fault blink' }}">
+                    {{ '✓' if d.puller_servo_ok else '✗' }} Puller OK
+                </span><br>
+                <span id="servo-table-ok" class="{{ 'ok' if d.table_servo_ok else 'fault blink' }}">
+                    {{ '✓' if d.table_servo_ok else '✗' }} Table OK
+                </span><br>
+                <span id="servo-group-fault" class="{{ 'fault blink' if d.group_fault else 'ok' }}">
+                    {{ '✗ Group Fault' if d.group_fault else '✓ Group OK' }}
+                </span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="label">Recover Position</div>
+            <div class="value" style="font-size:22px">
+                <span id="recover-pos">{{ '%.3f'|format(d.recover_position) if d.recover_position else '—' }}</span>
+            </div>
+            <div class="unit">ft — wire break backup position</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Segment Positions</div>
+            <div class="value" style="font-size:16px">
+                <span id="seg-end">End: {{ '%.3f'|format(d.tablepos_endofseg) if d.tablepos_endofseg else '—' }}</span>
+            </div>
+            <div class="unit">
+                Last: <span id="seg-last">{{ '%.3f'|format(d.tablepos_endoflastseg) if d.tablepos_endoflastseg else '—' }}</span> rev
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ── OPERATOR ──────────────────────────────────────────── -->
+    <div class="section">Operator Inputs</div>
+    <div class="grid">
+
+        <div class="card">
+            <div class="label">Panel Lamps</div>
+            <div class="checks">
+                <span id="lamp-run" class="{{ 'ok' if d.lamp_running else 'stopped' }}">
+                    {{ '● Running' if d.lamp_running else '○ Running' }}
+                </span><br>
+                <span id="lamp-stop" class="{{ 'fault' if d.lamp_stopped else 'ok' }}">
+                    {{ '● Stopped' if d.lamp_stopped else '○ Stopped' }}
+                </span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="label">Buttons</div>
+            <div class="checks">
+                <span id="btn-start" class="{{ 'ok' if d.start_pb else 'muted' }}">
+                    {{ '▶ START pressed' if d.start_pb else '○ Start' }}
+                </span><br>
+                <span id="btn-jog-fwd" class="{{ 'warn' if d.jog_fwd else 'muted' }}">
+                    {{ '▶ JOG FWD' if d.jog_fwd else '○ Jog Fwd' }}
+                </span><br>
+                <span id="btn-jog-rev" class="{{ 'warn' if d.jog_rev else 'muted' }}">
+                    {{ '◀ JOG REV' if d.jog_rev else '○ Jog Rev' }}
+                </span><br>
+                <span id="btn-ok-jog" class="{{ 'ok' if d.ok_to_jog else 'stopped' }}">
+                    {{ '✓ Jog Permitted' if d.ok_to_jog else '✗ Jog Locked' }}
+                </span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="label">Master No Motion</div>
+            <div class="value" style="font-size:22px">
+                <span id="no-motion" class="{{ 'warn' if d.master_no_motion else 'ok' }}">
+                    {{ 'YES' if d.master_no_motion else 'NO' }}
+                </span>
+            </div>
+            <div class="unit">axes at rest</div>
+        </div>
+
+        <div class="card">
+            <div class="label">HMI Messages</div>
+            <div class="value" style="font-size:22px">
+                <span id="msg-scroll">{{ d.machine_msg_scroll or '—' }}</span>
+            </div>
+            <div class="unit">active message code</div>
         </div>
 
     </div>
@@ -1258,6 +1445,50 @@ async function fetchAndUpdate() {
         }
         upd('table-vel-error', data.table_vel_error !== null && data.table_vel_error !== undefined
             ? data.table_vel_error.toFixed(5) : '—');
+        upd('puller-vel-err', data.puller_vel_cmd_err !== null && data.puller_vel_cmd_err !== undefined
+            ? data.puller_vel_cmd_err.toFixed(5) : '—');
+        upd('puller-vel-err2', data.puller_vel_cmd_err !== null && data.puller_vel_cmd_err !== undefined
+            ? data.puller_vel_cmd_err.toFixed(5) : '—');
+        upd('seq-step',      data.sequence_step      !== null ? data.sequence_step      : '—');
+        upd('recover-pos',   data.recover_position   !== null && data.recover_position > 0
+            ? data.recover_position.toFixed(3) : '—');
+        upd('msg-scroll',    data.machine_msg_scroll !== null ? data.machine_msg_scroll : '—');
+        upd('seg-end',       data.tablepos_endofseg  !== null && data.tablepos_endofseg !== undefined
+            ? 'End: ' + data.tablepos_endofseg.toFixed(3) : 'End: —');
+        upd('seg-last',      data.tablepos_endoflastseg !== null && data.tablepos_endoflastseg !== undefined
+            ? data.tablepos_endoflastseg.toFixed(3) : '—');
+        // Servo health
+        function setServoSpan(id, ok, okText, faultText) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = ok ? '✓ ' + okText : '✗ ' + faultText;
+            el.className = ok ? 'ok' : 'fault blink';
+        }
+        setServoSpan('servo-puller-ok',    data.puller_servo_ok,  'Puller OK', 'Puller FAULT');
+        setServoSpan('servo-table-ok',     data.table_servo_ok,   'Table OK',  'Table FAULT');
+        setServoSpan('servo-group-fault',  !data.group_fault,     'Group OK',  'Group Fault');
+        // Lamps
+        const lampRun  = document.getElementById('lamp-run');
+        const lampStop = document.getElementById('lamp-stopped');
+        if (lampRun)  { lampRun.textContent  = data.lamp_running ? '● Running'  : '○ Running';
+                        lampRun.className    = data.lamp_running ? 'ok' : 'muted'; }
+        if (lampStop) { lampStop.textContent = data.lamp_stopped ? '● Stopped'  : '○ Stopped';
+                        lampStop.className   = data.lamp_stopped ? 'fault' : 'ok'; }
+        // Buttons
+        function setBtn(id, active, activeText, inactiveText, activeClass) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = active ? activeText : inactiveText;
+            el.className   = active ? activeClass : 'muted';
+        }
+        setBtn('btn-start',   data.start_pb,   '▶ START pressed', '○ Start',   'ok');
+        setBtn('btn-jog-fwd', data.jog_fwd,    '▶ JOG FWD',       '○ Jog Fwd', 'warn');
+        setBtn('btn-jog-rev', data.jog_rev,    '◀ JOG REV',       '○ Jog Rev', 'warn');
+        setBtn('btn-ok-jog',  data.ok_to_jog,  '✓ Jog Permitted', '✗ Jog Locked', 'ok');
+        // No motion
+        const noMotEl = document.getElementById('no-motion');
+        if (noMotEl) { noMotEl.textContent = data.master_no_motion ? 'YES' : 'NO';
+                       noMotEl.className   = data.master_no_motion ? 'warn' : 'ok'; }
         upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
         upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
         upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
