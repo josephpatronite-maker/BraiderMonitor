@@ -968,14 +968,6 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Table Velocity Error</div>
-            <div class="value" style="font-size:22px">
-                <span id="table-vel-error">{% if d.table_vel_error is not none %}{{ '%.5f'|format(d.table_vel_error) }}{% else %}—{% endif %}</span>
-            </div>
-            <div class="unit">cmd − actual rev/s · motor load proxy</div>
-        </div>
-
-        <div class="card">
             <div class="label">VFD — Actual / Command</div>
             <div class="value" style="font-size:18px">
                 <span id="vfd-actual">{{ d.vfd_freq_actual or '—' }}</span> / <span id="vfd-command">{{ d.vfd_freq_command or '—' }}</span>
