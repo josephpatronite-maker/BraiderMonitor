@@ -456,8 +456,15 @@ def monitor_loop():
                         if isinstance(recipe_raw, dict):
                             recipe_name     = recipe_raw.get('Name', 'Unknown')
                             
-                            # Use Low_PPI if available from our live poll, otherwise fallback to the recipe default
-                            recipe_ppi      = od.get('Low_PPI') if od.get('Low_PPI') is not None else recipe_raw.get('Body_PPI')
+                            # 1. Check if the high-density pass is currently active
+                            if od.get('Hi_PPI_Running') == 1:
+                                recipe_ppi = od.get('Hi_PPI', 25.0)
+                            # 2. If not, use Low_PPI as our live operational value
+                            elif od.get('Low_PPI') is not None:
+                                recipe_ppi = od.get('Low_PPI')
+                            # 3. Absolute fallback to the base recipe structure if tags are missing
+                            else:
+                                recipe_ppi = recipe_raw.get('Body_PPI')
                             
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
