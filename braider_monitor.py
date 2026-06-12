@@ -391,6 +391,23 @@ _latest = {
     # Process
     'taper_sensor':      None,
     'speed_ratio':       None,
+    'table_vel_error':   None,
+    'puller_vel_error':  None,
+    'table_actual_vel':  None,
+    'puller_actual_vel': None,
+    'table_actual_accel':None,
+    'puller_actual_accel':None,
+    'table_motion_status':None,
+    'puller_motion_status':None,
+    'group_status':      None,
+    'group_fault':       None,
+    'abs_value_peak':    None,
+    'ave_current_data':  None,
+    'fault_wire_break':  None,
+    'fault_estop':       None,
+    'recover_step':      None,
+    'puller_current_dist':None,
+    'table_current_dist':None,
     'machine_faults':    None,
     'no_msgs':           None,
     'state_elapsed_s':   None,
@@ -953,7 +970,7 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Table Velocity Error</div>
             <div class="value" style="font-size:22px">
-                <span id="table-vel-error">{{ '%.5f'|format(d.table_vel_error) if d.table_vel_error is not none else '—' }}</span>
+                <span id="table-vel-error">{% if d.table_vel_error is not none %}{{ '%.5f'|format(d.table_vel_error) }}{% else %}—{% endif %}</span>
             </div>
             <div class="unit">cmd − actual rev/s · motor load proxy</div>
         </div>
