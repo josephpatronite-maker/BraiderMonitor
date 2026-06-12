@@ -455,15 +455,19 @@ def monitor_loop():
                         recipe_raw = od.get('CurrentRecipe', {})
                         if isinstance(recipe_raw, dict):
                             recipe_name     = recipe_raw.get('Name', 'Unknown')
-                            
-                            # 1. Check if the high-density pass is currently active
-                            if od.get('Hi_PPI_Running') == 1:
-                                recipe_ppi = od.get('Hi_PPI', 25.0)
-                            # 2. If not, use Low_PPI as our live operational value
-                            elif od.get('Low_PPI') is not None:
-                                recipe_ppi = od.get('Low_PPI')
-                            # 3. Absolute fallback to the base recipe structure if tags are missing
+
+                            # PPI selection — depends on mandrel mode
+                            mandrel_mode_val = od.get('HMI_Mandrel_Mode')
+                            if mandrel_mode_val:
+                                # In mandrel mode — check Hi/Low PPI
+                                if od.get('Hi_PPI_Running') == 1:
+                                    recipe_ppi = od.get('Hi_PPI', 25.0)
+                                elif od.get('Low_PPI') is not None:
+                                    recipe_ppi = od.get('Low_PPI')
+                                else:
+                                    recipe_ppi = recipe_raw.get('Body_PPI')
                             else:
+                                # Not in mandrel mode — use default recipe PPI
                                 recipe_ppi = recipe_raw.get('Body_PPI')
                             
                             recipe_modified = od.get('Recipe_Modified')
@@ -880,11 +884,11 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">VFD — Actual / Command</div>
             <div class="value" style="font-size:18px">
-                {{ d.vfd_freq_actual or '—' }} / {{ d.vfd_freq_command or '—' }}
+                <span id="vfd-actual">{{ d.vfd_freq_actual or '—' }}</span> / <span id="vfd-command">{{ d.vfd_freq_command or '—' }}</span>
             </div>
             <div class="unit">
-                Hz×10 &nbsp;|&nbsp; delta: {{ d.vfd_freq_delta or 0 }}
-                {% if d.vfd_at_ref %}&nbsp;<span class="ok">AT REF</span>{% endif %}
+                Hz×10 &nbsp;|&nbsp; delta: <span id="vfd-delta">{{ d.vfd_freq_delta or 0 }}</span>
+                <span id="vfd-at-ref">{% if d.vfd_at_ref %}&nbsp;<span class="ok">AT REF</span>{% endif %}</span>
                 {% if d.vfd_faulted %}&nbsp;<span class="fault blink">VFD FAULT</span>{% endif %}
             </div>
         </div>
@@ -1154,6 +1158,11 @@ async function fetchAndUpdate() {
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
         upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
+        upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
+        upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
+        upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
+        const vfdRef = document.getElementById('vfd-at-ref');
+        if (vfdRef) vfdRef.innerHTML = data.vfd_at_ref ? '&nbsp;<span class="ok">AT REF</span>' : '';
         upd('wb-value',     wb !== null ? wb : '—');
 
         function setSafety(id, ok, okText, faultText, faultClass) {
