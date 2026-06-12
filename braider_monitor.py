@@ -480,19 +480,25 @@ def monitor_loop():
                         if isinstance(recipe_raw, dict):
                             recipe_name     = recipe_raw.get('Name', 'Unknown')
 
-                            # PPI selection — depends on mandrel mode
+                            # PPI selection — Body_PPI from recipe struct is the correct value
+                            # Hi/Low PPI tags are only used in mandrel mode
                             mandrel_mode_val = od.get('HMI_Mandrel_Mode')
+                            body_ppi   = recipe_raw.get('Body_PPI')
+                            hi_ppi     = od.get('Hi_PPI')
+                            low_ppi    = od.get('Low_PPI')
+                            hi_running = od.get('Hi_PPI_Running')
+
                             if mandrel_mode_val:
-                                # In mandrel mode — check Hi/Low PPI
-                                if od.get('Hi_PPI_Running') == 1:
-                                    recipe_ppi = od.get('Hi_PPI', 25.0)
-                                elif od.get('Low_PPI') is not None:
-                                    recipe_ppi = od.get('Low_PPI')
+                                # Mandrel mode — Hi pass takes priority over Low
+                                if hi_running == 1 and hi_ppi is not None:
+                                    recipe_ppi = hi_ppi
+                                elif low_ppi is not None:
+                                    recipe_ppi = low_ppi
                                 else:
-                                    recipe_ppi = recipe_raw.get('Body_PPI')
+                                    recipe_ppi = body_ppi
                             else:
-                                # Not in mandrel mode — use default recipe PPI
-                                recipe_ppi = recipe_raw.get('Body_PPI')
+                                # Standard mode — Body_PPI from recipe struct is correct
+                                recipe_ppi = body_ppi
                             
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
@@ -846,9 +852,11 @@ DASHBOARD_HTML = """
             <div class="label">Recipe</div>
             <div class="value" style="font-size:22px">{{ d.recipe_name or '—' }}</div>
             <div class="unit">
-                {{ d.recipe_ppi }} PPI
+                Body: {{ d.recipe_ppi }} PPI
+                {% if d.connector_ppi %}&nbsp;| Conn: {{ d.connector_ppi }} PPI{% endif %}
                 {% if d.recipe_modified %}&nbsp;<span class="warn">modified</span>{% endif %}
                 {% if d.mandrel_mode %}&nbsp;| mandrel{% endif %}
+                {% if d.sensor_mode %}&nbsp;| <span class="ok">sensor</span>{% endif %}
             </div>
         </div>
 
@@ -1181,7 +1189,7 @@ async function fetchAndUpdate() {
         upd('table-rpm-value', ts ? (ts * 60).toFixed(1) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
-        upd('taper-value',  data.taper_sensor ? data.taper_sensor.toFixed(2) : '—');
+        upd('taper-value',  data.taper_sensor !== null && data.taper_sensor !== undefined ? data.taper_sensor.toFixed(2) : '—');
         upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
         upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
         upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
