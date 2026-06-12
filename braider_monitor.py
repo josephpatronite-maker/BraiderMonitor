@@ -145,8 +145,10 @@ OEE_TAGS = [
     'Loop_Length_Feet',         # Length per loop
     'Carrier_Mode',             # Carrier configuration mode
     'Current_Ratio',            # Current gear ratio
-    'Low_PPI',            # <-- Add this
-    'Hi_PPI'
+    'Low_PPI',                  # Low PPI for mandrel mode
+    'Hi_PPI',                   # High PPI for mandrel mode
+    'Hi_PPI_Running',           # Whether high PPI pass is active
+    'Active_Segment',           # Current active segment — needed for live PPI lookup
 ]
 
 # Tags to watch for fault events — logged to event_log on change
@@ -499,7 +501,7 @@ def monitor_loop():
                                 # Standard mode — read live PPI from active segment Picks
                                 try:
                                     segments   = recipe_raw.get('Segments', [])
-                                    active_seg = d.get('Active_Segment') or 1
+                                    active_seg = od.get('Active_Segment') or d.get('Active_Segment') or 1
                                     seg_data   = segments[int(active_seg)] if segments else None
                                     seg_picks  = seg_data.get('Picks') if seg_data else None
                                     recipe_ppi = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
