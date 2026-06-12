@@ -951,11 +951,11 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Table Drive Current</div>
+            <div class="label">Table Velocity Error</div>
             <div class="value" style="font-size:22px">
-                <span id="current-peak">{{ '%.1f'|format(d.abs_value_peak) if d.abs_value_peak else '—' }}</span>
+                <span id="table-vel-error">{{ '%.5f'|format(d.table_vel_error) if d.table_vel_error is not none else '—' }}</span>
             </div>
-            <div class="unit">peak abs value — relative units</div>
+            <div class="unit">cmd − actual rev/s · motor load proxy</div>
         </div>
 
         <div class="card">
@@ -1247,7 +1247,8 @@ async function fetchAndUpdate() {
         if (taperUnit) {
             taperUnit.textContent = (data.sensor_mode ? 'sensor active' : 'sensor off') + ' — units TBD';
         }
-        upd('current-peak', data.abs_value_peak ? data.abs_value_peak.toFixed(1) : '—');
+        upd('table-vel-error', data.table_vel_error !== null && data.table_vel_error !== undefined
+            ? data.table_vel_error.toFixed(5) : '—');
         upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
         upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
         upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
