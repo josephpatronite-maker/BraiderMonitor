@@ -489,24 +489,19 @@ def monitor_loop():
                             low_ppi    = od.get('Low_PPI')
                             hi_running = od.get('Hi_PPI_Running')
 
-                            if mandrel_mode_val:
-                                # Mandrel mode — Hi pass takes priority over Low
+                            # Always use active segment Picks as live PPI — most accurate
+                            # Hi_PPI_Running overrides when high-density pass is active
+                            try:
                                 if hi_running == 1 and hi_ppi is not None:
                                     recipe_ppi = hi_ppi
-                                elif low_ppi is not None:
-                                    recipe_ppi = low_ppi
                                 else:
-                                    recipe_ppi = recipe_raw.get('Connector_PPI')
-                            else:
-                                # Standard mode — read live PPI from active segment Picks
-                                try:
                                     segments   = recipe_raw.get('Segments', [])
-                                    active_seg = od.get('Active_Segment') or d.get('Active_Segment') or 1
+                                    active_seg = od.get('Active_Segment') or 1
                                     seg_data   = segments[int(active_seg)] if segments else None
                                     seg_picks  = seg_data.get('Picks') if seg_data else None
                                     recipe_ppi = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
-                                except Exception:
-                                    recipe_ppi = recipe_raw.get('Connector_PPI')
+                            except Exception:
+                                recipe_ppi = recipe_raw.get('Connector_PPI')
                             
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
