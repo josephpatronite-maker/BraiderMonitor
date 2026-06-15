@@ -903,6 +903,9 @@ def monitor_loop():
                 _latest['connected'] = False
                 _latest['last_error'] = str(e)
 
+            # Still run archive check even when disconnected
+            archive_logs()
+
             if not hasattr(monitor_loop, '_retry_count'):
                 monitor_loop._retry_count = 0
             monitor_loop._retry_count += 1
@@ -2284,12 +2287,13 @@ def api_floor_data():
     timestamps, table_speed, puller_speed, speed_ratio, states = [], [], [], [], []
     import glob
     all_rows = []
-    # Include archived files that match the date range
     base = PROCESS_LOG.replace('.csv', '')
+
     if range_param == 'week':
-        # Grab up to 7 days of archives
+        # Current week — check archives from Mon to today
         from datetime import date as _date, timedelta as _td
-        for i in range(7):
+        days_since_mon = _date.today().weekday()
+        for i in range(days_since_mon + 1):
             d = (_date.today() - _td(days=i)).strftime('%Y%m%d')
             for archive in glob.glob(base + '_archived_' + d + '*.csv'):
                 try:
@@ -2297,8 +2301,18 @@ def api_floor_data():
                         all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
                 except Exception:
                     pass
+
+    elif range_param == 'lastweek':
+        # Last week Mon-Sun — scan ALL archives and filter by date range
+        for archive in sorted(glob.glob(base + '_archived_*.csv')):
+            try:
+                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                    all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
+            except Exception:
+                pass
+        # Also check live file in case it has last week rows (e.g. no weekend archive)
     else:
-        # Today — check archives from today
+        # Today — check archives from today only
         today_compact = date.today().strftime('%Y%m%d')
         for archive in glob.glob(base + '_archived_' + today_compact + '*.csv'):
             try:
