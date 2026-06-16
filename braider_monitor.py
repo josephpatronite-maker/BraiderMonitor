@@ -1260,16 +1260,30 @@ DASHBOARD_HTML = """
         &nbsp;|&nbsp; Logs: {{ log_dir }}
         &nbsp;|&nbsp; {{ braider_id }}
         &nbsp;|&nbsp; <span id="last-update" style="color:#555"></span>
+        &nbsp;|&nbsp; <button id="detail-btn" onclick="toggleDetail()" style="background:none;border:1px solid #444;color:#888;cursor:pointer;padding:2px 8px;border-radius:4px;font-size:11px;">🔍 Show Detail</button>
     </div>
 
 <script>
+// ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_POINTS = 75;
-const tableSpeed  = Array(MAX_POINTS).fill(null);
-const pullerSpeed = Array(MAX_POINTS).fill(null);
-const speedRatio  = Array(MAX_POINTS).fill(null);
-const timestamps  = Array(MAX_POINTS).fill('');
-const machineStates = Array(MAX_POINTS).fill(0);
-const canvas = document.getElementById('liveChart');
+const IO_BIT_LABELS = [
+    'EStop_OK','Door_Closed','Puller_SSW_Close','Puller_SSW_Open',
+    'Start_PB','Stop_PB','Jog_Fwd','TakeUp_OL',
+    'Upper_Prox','Lower_Prox','WireBreak_SW','Triaxial_SW'
+];
+const STATE_COLORS = {
+    16:'rgba(102,187,106,0.12)', 4:'rgba(239,83,80,0.08)', 1:'rgba(144,164,174,0.05)'
+};
+
+// ── Rolling data arrays ───────────────────────────────────────────────────────
+const tableSpeedArr  = Array(MAX_POINTS).fill(null);
+const pullerSpeedArr = Array(MAX_POINTS).fill(null);
+const speedRatioArr  = Array(MAX_POINTS).fill(null);
+const timestampsArr  = Array(MAX_POINTS).fill('');
+const machineStatesArr = Array(MAX_POINTS).fill(0);
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+const canvas    = document.getElementById('liveChart');
 const canvasCtx = canvas.getContext('2d');
 
 function drawChart() {
@@ -1281,22 +1295,26 @@ function drawChart() {
     const panelH = (H - PAD.top - PAD.bottom - GAP*(PANELS-1)) / PANELS;
     canvasCtx.clearRect(0,0,W,H);
     const panelTop = p => PAD.top + p*(panelH+GAP);
+
     function drawBackground(p) {
         for (let i=0; i<MAX_POINTS-1; i++) {
-            const x0=PAD.left+(i/(MAX_POINTS-1))*plotW, x1=PAD.left+((i+1)/(MAX_POINTS-1))*plotW;
-            canvasCtx.fillStyle=machineStates[i]===16?'rgba(102,187,106,0.12)':'rgba(144,164,174,0.08)';
+            const x0=PAD.left+(i/(MAX_POINTS-1))*plotW;
+            const x1=PAD.left+((i+1)/(MAX_POINTS-1))*plotW;
+            canvasCtx.fillStyle = machineStatesArr[i]===16
+                ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.06)';
             canvasCtx.fillRect(x0,panelTop(p),x1-x0,panelH);
         }
         canvasCtx.strokeStyle='#333'; canvasCtx.lineWidth=0.5;
         for (let i=0; i<=3; i++) {
             const y=panelTop(p)+(i/3)*panelH;
-            canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left,y); canvasCtx.lineTo(PAD.left+plotW,y); canvasCtx.stroke();
+            canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left,y);
+            canvasCtx.lineTo(PAD.left+plotW,y); canvasCtx.stroke();
         }
     }
-    function range(arr) {
+    function getRange(arr) {
         const vals=arr.filter(v=>v!==null&&isFinite(v));
         if (!vals.length) return [0,1];
-        const mn=Math.min(...vals),mx=Math.max(...vals);
+        const mn=Math.min(...vals), mx=Math.max(...vals);
         const pad=(mx-mn)*0.15||0.05; return [mn-pad,mx+pad];
     }
     function drawLine(p,data,color,mn,mx) {
@@ -1307,7 +1325,8 @@ function drawChart() {
             if (data[i]===null||!isFinite(data[i])) { started=false; continue; }
             const x=PAD.left+(i/(MAX_POINTS-1))*plotW;
             const y=top+panelH-((data[i]-mn)/(mx-mn))*panelH;
-            if (!started) { canvasCtx.moveTo(x,y); started=true; } else canvasCtx.lineTo(x,y);
+            if (!started) { canvasCtx.moveTo(x,y); started=true; }
+            else canvasCtx.lineTo(x,y);
         }
         canvasCtx.stroke();
     }
@@ -1320,179 +1339,246 @@ function drawChart() {
         canvasCtx.fillStyle=color; canvasCtx.font='bold 10px monospace'; canvasCtx.textAlign='left';
         canvasCtx.fillText(text,PAD.left+4,panelTop(p)+11);
     }
-    const [tMn,tMx]=range(tableSpeed);
-    drawBackground(0); drawLine(0,tableSpeed,'#4fc3f7',tMn,tMx); labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rev/s)','#4fc3f7');
-    const [pMn,pMx]=range(pullerSpeed);
-    drawBackground(1); drawLine(1,pullerSpeed,'#81c784',pMn,pMx); labelY(1,pMn,pMx,'#81c784'); labelPanel(1,'Puller Speed (in/s)','#81c784');
-    const [rMn,rMx]=range(speedRatio);
-    drawBackground(2); drawLine(2,speedRatio,'#ffb74d',rMn,rMx); labelY(2,rMn,rMx,'#ffb74d'); labelPanel(2,'Speed Ratio','#ffb74d');
+    const [tMn,tMx]=getRange(tableSpeedArr);
+    drawBackground(0); drawLine(0,tableSpeedArr,'#4fc3f7',tMn,tMx);
+    labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rev/s)','#4fc3f7');
+    const [pMn,pMx]=getRange(pullerSpeedArr);
+    drawBackground(1); drawLine(1,pullerSpeedArr,'#81c784',pMn,pMx);
+    labelY(1,pMn,pMx,'#81c784'); labelPanel(1,'Puller Speed (in/s)','#81c784');
+    const [rMn,rMx]=getRange(speedRatioArr);
+    drawBackground(2); drawLine(2,speedRatioArr,'#ffb74d',rMn,rMx);
+    labelY(2,rMn,rMx,'#ffb74d'); labelPanel(2,'Speed Ratio','#ffb74d');
     canvasCtx.fillStyle='#555'; canvasCtx.font='9px monospace'; canvasCtx.textAlign='center';
     const xBottom=panelTop(2)+panelH+14;
-    if (timestamps[0]) canvasCtx.fillText(timestamps[0],PAD.left,xBottom);
-    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1],PAD.left+plotW,xBottom);
+    if (timestampsArr[0]) canvasCtx.fillText(timestampsArr[0],PAD.left,xBottom);
+    if (timestampsArr[MAX_POINTS-1]) canvasCtx.fillText(timestampsArr[MAX_POINTS-1],PAD.left+plotW,xBottom);
     const mid=Math.floor(MAX_POINTS/2);
-    if (timestamps[mid]) canvasCtx.fillText(timestamps[mid],PAD.left+plotW/2,xBottom);
+    if (timestampsArr[mid]) canvasCtx.fillText(timestampsArr[mid],PAD.left+plotW/2,xBottom);
 }
 
-let lastState=null, lastWBBits=null, lastSeenTimestamp='', timestampAgeTicks=0;
+// ── Helper functions (declared outside fetchAndUpdate) ────────────────────────
+function setSafety(id, ok, okText, faultText, faultClass, isStale) {
+    const el = document.getElementById(id); if (!el) return;
+    el.textContent = (ok && !isStale) ? '✓ ' + okText : '✗ ' + (isStale ? 'DATA STALE' : faultText);
+    el.className   = (ok && !isStale) ? 'ok' : faultClass;
+}
+
+function setFault(id, active, okText, faultText) {
+    const el = document.getElementById(id); if (!el) return;
+    el.textContent = active ? '✗ ' + faultText : '✓ ' + okText;
+    el.className   = active ? 'fault blink' : 'ok';
+}
+
+function updateIoDecoder(wb, isStale) {
+    const ioEl  = document.getElementById('io-decoded');
+    const binEl = document.getElementById('wb-binary');
+    if (wb !== null && wb >= 0 && !isStale) {
+        let binStr = '';
+        for (let b = 11; b >= 0; b--) binStr += (wb & (1 << b)) ? '1' : '0';
+        if (binEl) binEl.textContent = binStr;
+        if (ioEl) {
+            let html = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:4px;">';
+            IO_BIT_LABELS.forEach((label, bit) => {
+                const active = (wb & (1 << bit)) !== 0;
+                const bg     = active ? '#1b3a1b' : '#1a1a1a';
+                const color  = active ? '#66bb6a' : '#555';
+                const border = active ? '#2d5a2d' : '#2a2a2a';
+                html += `<div style="background:${bg};border:1px solid ${border};border-radius:4px;padding:4px 6px;text-align:center;">
+                    <div style="font-size:9px;color:#666;margin-bottom:1px;">bit ${bit}</div>
+                    <div style="font-size:15px;font-weight:bold;color:${color};">${active ? '1' : '0'}</div>
+                    <div style="font-size:9px;color:${color};margin-top:1px;line-height:1.3;">${label}</div>
+                </div>`;
+            });
+            html += '</div>';
+            ioEl.innerHTML = html;
+        }
+    } else if (wb !== null && wb < 0) {
+        if (binEl) binEl.textContent = 'I/O FAULT';
+        if (ioEl)  ioEl.innerHTML = '<span style="color:#ef5350;font-size:12px;">INVALID — I/O module fault during physical disturbance</span>';
+    } else {
+        if (binEl) binEl.textContent = '—';
+        if (ioEl)  ioEl.textContent  = '—';
+    }
+}
+
+function updatePie(pcts) {
+    const oeeEl    = document.getElementById('oee-value');
+    const legendEl = document.getElementById('oee-legend');
+    const pieCanvas= document.getElementById('oeePieCanvas');
+    const stateColors = {
+        'RUNNING':'#66bb6a','READY':'#4fc3f7','STOPPED':'#ef5350',
+        'PAUSED':'#ffa726','OFF':'#78909c','ABORTED':'#b71c1c','UNKNOWN':'#555'
+    };
+    if (!oeeEl || !Object.keys(pcts).length) {
+        if (oeeEl) oeeEl.textContent = '—';
+        if (legendEl) legendEl.textContent = 'Waiting...';
+        return;
+    }
+    const runningPct = pcts['RUNNING'] || 0;
+    oeeEl.textContent = runningPct.toFixed(1) + '%';
+    oeeEl.style.color = runningPct>=50 ? '#66bb6a' : runningPct>=25 ? '#ffa726' : '#ef5350';
+    if (legendEl) {
+        legendEl.innerHTML = Object.entries(pcts).map(([s,p]) =>
+            `<div><span style="display:inline-block;width:8px;height:8px;background:${stateColors[s]||'#999'};margin-right:4px;border-radius:2px;"></span>${s}: ${p}%</div>`
+        ).join('');
+    }
+    if (pieCanvas) {
+        const ctx=pieCanvas.getContext('2d'); ctx.clearRect(0,0,110,110);
+        const cx=55,cy=55,r=50; let angle=-Math.PI/2;
+        for (const [s,p] of Object.entries(pcts)) {
+            if (p<=0) continue;
+            const sweep=(p/100)*(2*Math.PI);
+            ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,angle,angle+sweep);
+            ctx.closePath(); ctx.fillStyle=stateColors[s]||'#999'; ctx.fill();
+            ctx.strokeStyle='#0d1117'; ctx.lineWidth=1.5; ctx.stroke();
+            angle+=sweep;
+        }
+        ctx.beginPath(); ctx.arc(cx,cy,r*0.52,0,Math.PI*2);
+        ctx.fillStyle='#161b22'; ctx.fill();
+    }
+}
+
+// ── Detail toggle ─────────────────────────────────────────────────────────────
+let detailVisible = false;
+function toggleDetail() {
+    detailVisible = !detailVisible;
+    const sections = document.querySelectorAll('.detail-section');
+    sections.forEach(s => s.style.display = detailVisible ? '' : 'none');
+    const btn = document.getElementById('detail-btn');
+    if (btn) btn.textContent = detailVisible ? '🔍 Hide Detail' : '🔍 Show Detail';
+}
+
+// ── Main fetch loop ───────────────────────────────────────────────────────────
+let lastSeenTimestamp = '', timestampAgeTicks = 0;
 
 async function fetchAndUpdate() {
     try {
-        const res=await fetch('/api/latest'); const data=await res.json();
-        const now=new Date().toLocaleTimeString('en-US',{hour12:false});
-        const ts=data.table_speed||0, ps=data.puller_speed||0, sr=data.speed_ratio||null;
-        const wb=data.wire_break_bits, st=data.machine_state;
-        let isStale=false;
-        if (data.timestamp) {
-            if (data.timestamp===lastSeenTimestamp) timestampAgeTicks++;
-            else { lastSeenTimestamp=data.timestamp; timestampAgeTicks=0; }
-            if (timestampAgeTicks>=5||!data.connected) isStale=true;
-        } else { isStale=true; }
-        tableSpeed.shift();  tableSpeed.push(isStale?null:ts);
-        pullerSpeed.shift(); pullerSpeed.push(isStale?null:ps);
-        speedRatio.shift();  speedRatio.push(isStale?null:sr);
-        timestamps.shift();  timestamps.push(now);
-        machineStates.shift();machineStates.push(isStale?0:(st||0));
-        drawChart();
-        const statusEl=document.getElementById('conn-status');
-        if (isStale||!data.connected) { statusEl.textContent='STALE DATA — PLC UNREACHABLE'; statusEl.className='fault'; }
-        else { statusEl.textContent='CONNECTED'; statusEl.className='ok'; }
-        document.getElementById('last-update').textContent='updated '+now;
-        const hts=document.getElementById('header-timestamp');
-        if (hts) hts.textContent=isStale?'—':(data.timestamp||'—');
-        const upd=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=isStale?'—':v;};
-        upd('feet-value',   data.puller_pos_feet ? data.puller_pos_feet.toFixed(2) : '—');
-        upd('table-value',  ts ? ts.toFixed(4) : '—');
-        upd('table-rpm-value', ts ? (ts*60).toFixed(1) : '—');
-        upd('puller-value', ps ? ps.toFixed(4) : '—');
-        upd('ratio-value',  sr ? sr.toFixed(5) : '—');
-        const taperEl=document.getElementById('taper-value');
-        if (taperEl) taperEl.textContent=(data.taper_sensor!==null&&data.taper_sensor>0)?data.taper_sensor.toFixed(2):'—';
-        upd('puller-vel-err', data.puller_vel_cmd_err!==null&&data.puller_vel_cmd_err!==undefined?data.puller_vel_cmd_err.toFixed(5):'—');
-        upd('table-vel-fb',   data.table_vel_feedback!==null&&data.table_vel_feedback!==undefined?data.table_vel_feedback.toFixed(4):'—');
-        upd('recover-step', data.recover_step!==null?data.recover_step:'—');
-        upd('vfd-actual',   data.vfd_freq_actual!==null?data.vfd_freq_actual:'—');
-        upd('vfd-command',  data.vfd_freq_command!==null?data.vfd_freq_command:'—');
-        upd('vfd-delta',    data.vfd_freq_delta!==null?data.vfd_freq_delta:'0');
-        const vfdRef=document.getElementById('vfd-at-ref');
-        if (vfdRef) vfdRef.innerHTML=data.vfd_at_ref?'&nbsp;<span class="ok">AT REF</span>':'';
-        upd('wb-value', wb!==null?wb:'—');
+        const res  = await fetch('/api/latest');
+        const data = await res.json();
+        const now  = new Date().toLocaleTimeString('en-US',{hour12:false});
+        const ts   = data.table_speed  || 0;
+        const ps   = data.puller_speed || 0;
+        const sr   = data.speed_ratio  || null;
+        const wb   = data.wire_break_bits;
+        const st   = data.machine_state;
 
-        // Decode Local:1:I.Data — show all 12 bits with index, value and label
-        const IO_BIT_LABELS = [
-            'EStop_OK','Door_Closed','Puller_SSW_Close','Puller_SSW_Open',
-            'Start_PB','Stop_PB','Jog_Fwd','TakeUp_OL',
-            'Upper_Prox','Lower_Prox','WireBreak_SW','Triaxial_SW'
-        ];
-        const ioEl  = document.getElementById('io-decoded');
-        const binEl = document.getElementById('wb-binary');
-        if (wb !== null && wb >= 0 && !isStale) {
-            let binStr = '';
-            for (let b = 11; b >= 0; b--) binStr += (wb & (1 << b)) ? '1' : '0';
-            if (binEl) binEl.textContent = binStr;
-            if (ioEl) {
-                let html = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:4px;">';
-                IO_BIT_LABELS.forEach((label, bit) => {
-                    const active = (wb & (1 << bit)) !== 0;
-                    const bg     = active ? '#1b3a1b' : '#1a1a1a';
-                    const color  = active ? '#66bb6a' : '#555';
-                    const border = active ? '#2d5a2d' : '#2a2a2a';
-                    html += `<div style="background:${bg};border:1px solid ${border};border-radius:4px;padding:4px 6px;text-align:center;">
-                        <div style="font-size:9px;color:#666;margin-bottom:1px;">bit ${bit}</div>
-                        <div style="font-size:15px;font-weight:bold;color:${color};">${active ? '1' : '0'}</div>
-                        <div style="font-size:9px;color:${color};margin-top:1px;line-height:1.3;">${label}</div>
-                    </div>`;
-                });
-                html += '</div>';
-                ioEl.innerHTML = html;
-            }
-        } else if (wb !== null && wb < 0) {
-            if (binEl) binEl.textContent = 'I/O FAULT';
-            if (ioEl)  ioEl.innerHTML = '<span style="color:#ef5350;font-size:12px;">INVALID — I/O module fault during physical disturbance</span>';
-        } else {
-            if (binEl) binEl.textContent = '—';
-            if (ioEl)  ioEl.textContent  = '—';
+        // Stale detection
+        let isStale = false;
+        if (data.timestamp) {
+            if (data.timestamp === lastSeenTimestamp) timestampAgeTicks++;
+            else { lastSeenTimestamp = data.timestamp; timestampAgeTicks = 0; }
+            if (timestampAgeTicks >= 5 || !data.connected) isStale = true;
+        } else { isStale = true; }
+
+        // Rolling arrays
+        tableSpeedArr.shift();   tableSpeedArr.push(isStale ? null : ts);
+        pullerSpeedArr.shift();  pullerSpeedArr.push(isStale ? null : ps);
+        speedRatioArr.shift();   speedRatioArr.push(isStale ? null : sr);
+        timestampsArr.shift();   timestampsArr.push(now);
+        machineStatesArr.shift();machineStatesArr.push(isStale ? 0 : (st||0));
+        drawChart();
+
+        // Connection status
+        const statusEl = document.getElementById('conn-status');
+        if (statusEl) {
+            statusEl.textContent = (!data.connected || isStale) ? 'STALE — PLC UNREACHABLE' : 'CONNECTED';
+            statusEl.className   = (!data.connected || isStale) ? 'fault' : 'ok';
         }
+        const luEl = document.getElementById('last-update');
+        if (luEl) luEl.textContent = 'updated ' + now;
+        const hts = document.getElementById('header-timestamp');
+        if (hts)  hts.textContent = isStale ? '—' : (data.timestamp || '—');
+
+        // Helper: set text, show '—' when stale
+        const upd = (id, v) => { const e=document.getElementById(id); if(e) e.textContent=isStale?'—':v; };
+
+        // Production / process cards
+        upd('feet-value',      data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
+        upd('table-value',     ts ? ts.toFixed(4) : '—');
+        upd('table-rpm-value', ts ? (ts*60).toFixed(1) : '—');
+        upd('puller-value',    ps ? ps.toFixed(4) : '—');
+        upd('ratio-value',     sr ? sr.toFixed(5) : '—');
+        upd('recover-step',    data.recover_step  != null ? data.recover_step  : '—');
+        upd('vfd-actual',      data.vfd_freq_actual  != null ? data.vfd_freq_actual  : '—');
+        upd('vfd-command',     data.vfd_freq_command != null ? data.vfd_freq_command : '—');
+        upd('vfd-delta',       data.vfd_freq_delta   != null ? data.vfd_freq_delta   : '0');
+        upd('puller-vel-err',  data.puller_vel_cmd_err  != null ? data.puller_vel_cmd_err.toFixed(5)  : '—');
+        upd('table-vel-fb',    data.table_vel_feedback  != null ? data.table_vel_feedback.toFixed(4)  : '—');
+
+        const taperEl = document.getElementById('taper-value');
+        if (taperEl) taperEl.textContent = (data.taper_sensor && data.taper_sensor > 0 && !isStale)
+            ? data.taper_sensor.toFixed(2) : '—';
+        const vfdRef = document.getElementById('vfd-at-ref');
+        if (vfdRef) vfdRef.innerHTML = (!isStale && data.vfd_at_ref) ? '&nbsp;<span class="ok">AT REF</span>' : '';
+
+        // State card
+        const stateEl  = document.getElementById('state-value');
+        const stateDiv = document.getElementById('state-div');
+        if (stateEl) stateEl.textContent = isStale ? 'UNKNOWN (DISCONNECTED)' : (data.state_name || '—');
+        if (stateDiv) stateDiv.className = 'value ' + (
+            isStale ? 'stopped' : st===16 ? 'running' :
+            (st===256||st===512) ? 'fault blink' : (st===64||st===128) ? 'paused' : 'stopped'
+        );
+
+        // Elapsed time
+        const elapsedEl = document.getElementById('elapsed-value');
+        if (elapsedEl) {
+            const elapsed = data.state_elapsed_s;
+            if (elapsed && !isStale) {
+                const h=Math.floor(elapsed/3600), m=Math.floor((elapsed%3600)/60);
+                elapsedEl.textContent = h+'h '+m+'m';
+            } else { elapsedEl.textContent = '—'; }
+        }
+
+        // IO / wire break card
+        upd('wb-value', wb != null ? wb : '—');
+        updateIoDecoder(wb, isStale);
         const wbDiv = document.getElementById('wb-div');
         if (wbDiv) {
             const abnormal = wb !== null && wb !== 3 && wb !== 1 && wb >= 0 && !isStale;
             wbDiv.className = 'value ' + (abnormal ? 'warn' : 'ok');
         }
-        function setSafety(id,ok,okText,faultText,faultClass) {
-            const el=document.getElementById(id); if (!el) return;
-            el.textContent=(ok&&!isStale)?'✓ '+okText:'✗ '+(isStale?'DATA STALE':faultText);
-            el.className=(ok&&!isStale)?'ok':faultClass;
+
+        // Faults card
+        const faultDiv  = document.getElementById('fault-div');
+        const faultUnit = document.getElementById('fault-unit');
+        if (faultDiv) {
+            const hasFault = !data.no_faults;
+            faultDiv.className   = 'value ' + ((hasFault && !isStale) ? 'fault blink' : 'ok');
+            faultDiv.textContent = isStale ? 'UNKNOWN' : (hasFault ? 'FAULT' : 'NONE');
         }
-        setSafety('safety-estop',   data.estop_ok,          'E-Stop',   'E-STOP PRESSED','fault blink');
-        setSafety('safety-door',    data.door_ok,           'Door',     'Door Open',     'warn');
-        setSafety('safety-guards',  data.guards_ok,         'Guards',   'Guards Open',   'fault');
-        setSafety('safety-motor',   !data.i_table_motor_ol, 'Motor OK', 'MOTOR OL',      'fault blink');
-        setSafety('safety-triaxial',!data.i_triaxial_wb,    'Triaxial OK','TRIAXIAL WB', 'fault blink');
-        setSafety('safety-core',    !data.core_break,       'Core OK',  'CORE BREAK',    'fault blink');
-        function setFault(id,active,okText,faultText) {
-            const el=document.getElementById(id); if(!el)return;
-            el.textContent=active?'✗ '+faultText:'✓ '+okText;
-            el.className=active?'fault blink':'ok';
-        }
-        setFault('fault-wb',     data.fault_wire_break,   'Wire Break',  'Wire Break');
-        setFault('fault-es',     data.fault_estop,        'E-Stop',      'E-Stop');
-        setFault('fault-puller', data.fault_puller_servo, 'Puller Servo','Puller Servo');
-        setFault('fault-table',  data.fault_table_servo,  'Table Servo', 'Table Servo');
-        const elapsed=data.state_elapsed_s;
-        const elapsedEl=document.getElementById('elapsed-value');
-        if (elapsedEl) {
-            if (elapsed&&!isStale) {
-                const h=Math.floor(elapsed/3600), m=Math.floor((elapsed%3600)/60);
-                elapsedEl.textContent=h+'h '+m+'m';
-            } else { elapsedEl.textContent='—'; }
-        }
-        const pcts=data.daily_state_pcts||{};
-        const oeeEl=document.getElementById('oee-value'), legendEl=document.getElementById('oee-legend');
-        const pieCanvas=document.getElementById('oeePieCanvas');
-        const stateColors={'RUNNING':'#66bb6a','READY':'#4fc3f7','STOPPED':'#ef5350','PAUSED':'#ffa726','OFF':'#78909c','ABORTED':'#b71c1c','UNKNOWN':'#555555'};
-        if (oeeEl&&Object.keys(pcts).length>0&&!isStale) {
-            const runningPct=pcts['RUNNING']||0;
-            oeeEl.textContent=runningPct.toFixed(1)+'%';
-            oeeEl.style.color=runningPct>=50?'#66bb6a':runningPct>=25?'#ffa726':'#ef5350';
-            let legendHTML='';
-            for (const [state,pct] of Object.entries(pcts)) {
-                const color=stateColors[state]||'#999';
-                legendHTML+=`<div><span style="display:inline-block;width:8px;height:8px;background:${color};margin-right:4px;border-radius:2px;"></span>${state}: ${pct}%</div>`;
+        if (faultUnit) faultUnit.textContent = (!isStale && data.machine_faults && data.machine_faults !== 4)
+            ? 'code: ' + data.machine_faults : '';
+
+        // Safety
+        setSafety('safety-estop',    data.estop_ok,           'E-Stop',    'E-STOP PRESSED', 'fault blink', isStale);
+        setSafety('safety-door',     data.door_ok,            'Door',      'Door Open',      'warn',        isStale);
+        setSafety('safety-guards',   data.guards_ok,          'Guards',    'Guards Open',    'fault',       isStale);
+        setSafety('safety-motor',    !data.i_table_motor_ol,  'Motor OK',  'MOTOR OL',       'fault blink', isStale);
+        setSafety('safety-triaxial', !data.i_triaxial_wb,     'Triaxial OK','TRIAXIAL WB',   'fault blink', isStale);
+        setSafety('safety-core',     !data.core_break,        'Core OK',   'CORE BREAK',     'fault blink', isStale);
+
+        // Individual faults
+        setFault('fault-wb',     data.fault_wire_break,   'Wire Break',   'Wire Break');
+        setFault('fault-es',     data.fault_estop,        'E-Stop',       'E-Stop');
+        setFault('fault-puller', data.fault_puller_servo, 'Puller Servo', 'Puller Servo');
+        setFault('fault-table',  data.fault_table_servo,  'Table Servo',  'Table Servo');
+
+        // Axis sync
+        for (let i=1; i<=5; i++) {
+            const el = document.getElementById('axis'+i+'-sync');
+            if (el) {
+                const ok = data['axis'+i+'_synced'];
+                el.className = 'axis ' + (ok ? 'axis-ok' : 'axis-warn');
             }
-            if (legendEl) legendEl.innerHTML=legendHTML;
-            if (pieCanvas) {
-                const ctx=pieCanvas.getContext('2d'); ctx.clearRect(0,0,110,110);
-                const cx=55,cy=55,r=50; let startAngle=-Math.PI/2;
-                for (const [state,pct] of Object.entries(pcts)) {
-                    if (pct<=0) continue;
-                    const sliceAngle=(pct/100)*(2*Math.PI);
-                    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,startAngle,startAngle+sliceAngle);
-                    ctx.closePath(); ctx.fillStyle=stateColors[state]||'#999'; ctx.fill();
-                    ctx.strokeStyle='#0d1117'; ctx.lineWidth=1.5; ctx.stroke();
-                    startAngle+=sliceAngle;
-                }
-                ctx.beginPath(); ctx.arc(cx,cy,r*0.52,0,Math.PI*2); ctx.fillStyle='#161b22'; ctx.fill();
-            }
-        } else if (oeeEl) {
-            oeeEl.textContent='—';
-            if (legendEl) legendEl.textContent=isStale?'Data stale':'Waiting...';
         }
-        const stateEl=document.getElementById('state-value');
-        if (stateEl) {
-            stateEl.textContent=isStale?'UNKNOWN (DISCONNECTED)':(data.state_name||'—');
-            const stateDiv=document.getElementById('state-div');
-            if (stateDiv) stateDiv.className='value '+(isStale?'stopped':st===16?'running':st===256||st===512?'fault blink':st===64||st===128?'paused':'stopped');
-        }
-        const wbDiv=document.getElementById('wb-div');
-        if (wbDiv) wbDiv.className='value '+(wb!==null&&wb!==3&&!isStale?'fault blink':'ok');
-        const faultDiv=document.getElementById('fault-div'), faultUnit=document.getElementById('fault-unit');
-        if (faultDiv) { const hf=!data.no_faults; faultDiv.className='value '+((hf&&!isStale)?'fault blink':'ok'); faultDiv.textContent=isStale?'UNKNOWN':(hf?'FAULT':'NONE'); }
-        if (faultUnit&&data.machine_faults&&data.machine_faults!==4&&!isStale) faultUnit.textContent='code: '+data.machine_faults;
-        else if (faultUnit) faultUnit.textContent='';
-        lastState=st; lastWBBits=wb;
+
+        // Daily utilization pie
+        updatePie(data.daily_state_pcts || {});
+
     } catch(e) {
-        const cs=document.getElementById('conn-status');
-        if (cs) { cs.textContent='DISCONNECTED'; cs.className='fault'; }
+        const cs = document.getElementById('conn-status');
+        if (cs) { cs.textContent = 'DISCONNECTED'; cs.className = 'fault'; }
     }
 }
 
