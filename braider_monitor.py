@@ -1162,23 +1162,13 @@ DASHBOARD_HTML = """
     <div class="section">Faults &amp; Safety</div>
     <div class="grid">
 
-        <div class="card">
+        <div class="card" style="grid-column: span 2;">
             <div class="label">Operator Inputs — Local:1:I.Data</div>
-            <div id="wb-div" class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 and d.wire_break_bits != 1 %}warn{% else %}ok{% endif %}" style="font-size:18px;">
+            <div id="wb-div" class="value ok" style="font-size:18px;">
                 <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
             </div>
-            <div class="unit" id="io-decoded" style="margin-top:6px; line-height:1.8; font-size:11px;">
-                {% if d.wire_break_bits is not none %}
-                    {% set bits = namespace(val=d.wire_break_bits) %}
-                    {% for label in ['EStop_OK','Door_Closed','Puller_SSW_Close','Puller_SSW_Open','Start_PB','Stop_PB','Jog_Fwd','TakeUp_OL','Upper_Prox','Lower_Prox','WireBreak_SW','Triaxial_SW'] %}
-                        {% set bit_idx = loop.index0 %}
-                        <span class="{{ 'ok' if (d.wire_break_bits is not none and d.wire_break_bits > 0 and d.wire_break_bits | int(0) != -32767 and (d.wire_break_bits | int) & (1 << bit_idx)) else 'stopped' }}" style="display:inline-block; margin-right:6px;">
-                            {{ '●' if (d.wire_break_bits is not none and d.wire_break_bits != -32767 and (d.wire_break_bits | int(0)) & (1 << bit_idx)) else '○' }} {{ label }}
-                        </span>
-                    {% endfor %}
-                {% else %}—{% endif %}
-            </div>
-            <div class="unit" style="margin-top:4px;">normal running = 3 (EStop_OK + Door_Closed)</div>
+            <div id="io-decoded" style="margin-top:8px; line-height:2; font-size:11px;">—</div>
+            <div class="unit" style="margin-top:4px;">normal running = 3 &nbsp;(EStop_OK + Door_Closed)</div>
         </div>
 
         <div class="card">
