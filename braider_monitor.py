@@ -19,7 +19,7 @@ Archiving:
 Flask dashboard at http://<pi-ip>:5000
 Floor report   at http://<pi-ip>:5000/floor
 
-Author: Joseph Patronite, Noble Gas Systems
+Author: Joseph J Patronite, Noble Gas Systems
 """
 
 import csv
