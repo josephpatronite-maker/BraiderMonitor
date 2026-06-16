@@ -1584,9 +1584,12 @@ def get_floor_report_data():
 
     timeline=[]; wire_breaks=0
     for row in event_rows:
-        etype=row.get('Event_Type','')
+        # Support both old schema (Event / From_State / To_State) and new schema (Event_Type / From_Value / To_Value)
+        etype = row.get('Event_Type') or row.get('Event','')
+        from_s = row.get('From_Value') or row.get('From_State','')
+        to_s   = row.get('To_Value')   or row.get('To_State','')
         if etype=='STATE_CHANGE':
-            timeline.append({'time':row.get('Timestamp','')[:19],'from_state':row.get('From_Value',''),'to_state':row.get('To_Value',''),'feet':row.get('Puller_Feet','')})
+            timeline.append({'time':row.get('Timestamp','')[:19],'from_state':from_s,'to_state':to_s,'feet':row.get('Puller_Feet','')})
         elif etype=='WIRE_BREAK':
             wire_breaks+=1
             timeline.append({'time':row.get('Timestamp','')[:19],'from_state':'WIRE BREAK','to_state':row.get('Detail',''),'feet':row.get('Puller_Feet','')})
@@ -1625,63 +1628,128 @@ def get_floor_report_data():
 FLOOR_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="refresh" content="60">
 <title>Braider 2 — Floor Report</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',Arial,sans-serif;padding:20px}
-h1{font-size:2rem;color:#58a6ff;margin-bottom:4px}
-.subtitle{color:#8b949e;font-size:1rem;margin-bottom:24px}
-.scorecard{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 16px;text-align:center}
-.card.green{border-color:#238636}.card.red{border-color:#da3633}.card.yellow{border-color:#9e6a03}.card.blue{border-color:#1f6feb}
-.card-label{font-size:.78rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
-.card-value{font-size:2.6rem;font-weight:700;line-height:1}
-.card-sub{font-size:.82rem;color:#8b949e;margin-top:5px}
-.up{color:#3fb950}.down{color:#f85149}.same{color:#8b949e}
-.bar-wrap{background:#21262d;border-radius:4px;height:8px;margin-top:10px;overflow:hidden}
-.bar-fill{height:100%;border-radius:4px}.bar-green{background:#238636}.bar-yellow{background:#9e6a03}.bar-red{background:#da3633}
-.section-title{font-size:1.1rem;font-weight:600;color:#58a6ff;margin-bottom:12px;border-bottom:1px solid #21262d;padding-bottom:6px}
-.section{margin-bottom:28px}
-table{width:100%;border-collapse:collapse;font-size:.9rem}
-th{background:#161b22;color:#8b949e;text-align:left;padding:8px 12px;font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
-td{padding:8px 12px;border-top:1px solid #21262d}
-.footer{color:#444;font-size:.78rem;margin-top:20px;text-align:center}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background:#0d1117; color:#e6edf3; font-family:'Segoe UI',Arial,sans-serif; padding:20px; }
+h1 { font-size:2rem; color:#58a6ff; margin-bottom:4px; }
+.subtitle { color:#8b949e; font-size:1rem; margin-bottom:24px; }
+.scorecard { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-bottom:28px; }
+.card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px 16px; text-align:center; }
+.card.green  { border-color:#238636; }
+.card.red    { border-color:#da3633; }
+.card.yellow { border-color:#9e6a03; }
+.card.blue   { border-color:#1f6feb; }
+.card-label  { font-size:.78rem; color:#8b949e; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
+.card-value  { font-size:2.6rem; font-weight:700; line-height:1; }
+.card-sub    { font-size:.82rem; color:#8b949e; margin-top:5px; }
+.card-vs     { font-size:.8rem; margin-top:6px; }
+.up   { color:#3fb950; } .down { color:#f85149; } .same { color:#8b949e; }
+.bar-wrap { background:#21262d; border-radius:4px; height:8px; margin-top:10px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:4px; }
+.bar-green  { background:#238636; } .bar-yellow { background:#9e6a03; } .bar-red { background:#da3633; }
+.section-title { font-size:1.1rem; font-weight:600; color:#58a6ff; margin-bottom:12px;
+                 border-bottom:1px solid #21262d; padding-bottom:6px; }
+.section { margin-bottom:28px; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th { background:#161b22; color:#8b949e; text-align:left; padding:8px 12px; font-weight:600;
+     font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; }
+td { padding:8px 12px; border-top:1px solid #21262d; }
+tr:hover td { background:#161b22; }
+.footer { color:#444; font-size:.78rem; margin-top:20px; text-align:center; }
 </style>
 </head>
 <body>
+
 <h1>Braider 2 — Daily Performance</h1>
 <div class="subtitle">{{ d.date }} &nbsp;·&nbsp; Refreshes every 60s &nbsp;·&nbsp; {{ d.total_hrs }}h logged today</div>
+
 <div class="scorecard">
+
   {% set r_color = 'green' if d.running_pct >= d.running_target_pct else ('yellow' if d.running_pct >= d.running_target_pct - 10 else 'red') %}
   <div class="card {{ r_color }}">
     <div class="card-label">Running Today</div>
     <div class="card-value" style="color:{% if r_color=='green' %}#3fb950{% elif r_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.running_pct }}%</div>
     <div class="card-sub">{{ d.running_hrs }}h · Target {{ d.running_target_pct }}%</div>
     {% if d.yest_running_pct is not none %}
-    <div style="font-size:.8rem;margin-top:6px">
-      {% set diff=(d.running_pct - d.yest_running_pct)|round(1) %}
-      {% if diff>0 %}<span class="up">▲ {{ diff }}% vs yesterday</span>
-      {% elif diff<0 %}<span class="down">▼ {{ diff|abs }}% vs yesterday</span>
+    <div class="card-vs">
+      {% set diff = (d.running_pct - d.yest_running_pct)|round(1) %}
+      {% if diff > 0 %}<span class="up">▲ {{ diff }}% vs yesterday</span>
+      {% elif diff < 0 %}<span class="down">▼ {{ diff|abs }}% vs yesterday</span>
       {% else %}<span class="same">= same as yesterday</span>{% endif %}
     </div>{% endif %}
     <div class="bar-wrap"><div class="bar-fill bar-{{ r_color }}" style="width:{{ [100,d.running_pct|int]|min }}%"></div></div>
   </div>
-  {% set c_color = 'green' if d.avg_changeover and d.avg_changeover<=50 else ('yellow' if d.avg_changeover and d.avg_changeover<=65 else 'red') %}
+
+  {% set c_color = 'green' if d.avg_changeover and d.avg_changeover <= 50 else ('yellow' if d.avg_changeover and d.avg_changeover <= 65 else 'red') %}
   <div class="card {{ c_color if d.avg_changeover else 'blue' }}">
     <div class="card-label">Avg Changeover</div>
-    <div class="card-value">{% if d.avg_changeover %}{{ d.avg_changeover }}<span style="font-size:1.2rem">m</span>{% else %}<span style="font-size:1.4rem;color:#8b949e">—</span>{% endif %}</div>
+    <div class="card-value" style="color:{% if c_color=='green' %}#3fb950{% elif c_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">
+      {% if d.avg_changeover %}{{ d.avg_changeover }}<span style="font-size:1.2rem">m</span>
+      {% else %}<span style="font-size:1.4rem;color:#8b949e">—</span>{% endif %}
+    </div>
     <div class="card-sub">{% if d.min_changeover %}Best {{ d.min_changeover }}m · Worst {{ d.max_changeover }}m{% else %}No changeovers yet{% endif %}</div>
-    <div class="card-sub">Target: ≤50 min</div>
+    <div class="card-sub" style="margin-top:4px">Target: ≤50 min</div>
   </div>
-  {% set w_color = 'green' if d.wire_breaks==0 else ('yellow' if d.wire_breaks<=2 else 'red') %}
+
+  {% set w_color = 'green' if d.wire_breaks == 0 else ('yellow' if d.wire_breaks <= 2 else 'red') %}
   <div class="card {{ w_color }}">
     <div class="card-label">Wire Breaks</div>
     <div class="card-value" style="color:{% if w_color=='green' %}#3fb950{% elif w_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.wire_breaks }}</div>
-    <div class="card-sub">{% if d.wire_breaks==0 %}Clean day ✓{% else %}{{ d.wire_breaks }} break(s){% endif %}</div>
+    <div class="card-sub">{% if d.wire_breaks == 0 %}Clean day ✓{% elif d.wire_breaks == 1 %}1 break{% else %}{{ d.wire_breaks }} breaks{% endif %}</div>
   </div>
+
 </div>
+
+<!-- ── Utilization Pie Charts ── -->
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:28px;">
+
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">Today — Midnight to Now</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="todayPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="todayPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
+  </div>
+
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">This Week — Mon to Now</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="weekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="weekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
+  </div>
+
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
+    <div class="section-title">Last Week — Mon to Sun</div>
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
+      <canvas id="lastWeekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
+      <div id="lastWeekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── State Timeline Charts ── -->
+<div class="section">
+  <div class="section-title">Today — Machine State Timeline</div>
+  <div id="todayChart" style="width:100%;height:220px;"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">This Week — Machine State Timeline</div>
+  <div id="weekChart" style="width:100%;height:220px;"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Last Week — Machine State Timeline</div>
+  <div id="lastWeekChart" style="width:100%;height:220px;"></div>
+</div>
+
+<!-- ── Changeovers Table ── -->
 <div class="section">
   <div class="section-title">Bobbin Changeovers Today ({{ d.changeovers|length }})</div>
   {% if d.changeovers %}
@@ -1689,15 +1757,145 @@ td{padding:8px 12px;border-top:1px solid #21262d}
     <thead><tr><th>#</th><th>Start</th><th>End</th><th>Duration</th><th>Rating</th></tr></thead>
     <tbody>
     {% for c in d.changeovers %}
-    <tr><td>{{ loop.index }}</td><td>{{ c.start[11:19] }}</td><td>{{ c.end[11:19] }}</td>
-    <td><strong>{{ c.min }} min</strong></td>
-    <td>{% if c.min<=45 %}<span style="color:#3fb950">● Fast</span>{% elif c.min<=55 %}<span style="color:#d29922">● On time</span>{% else %}<span style="color:#f85149">● Slow</span>{% endif %}</td></tr>
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ c.start[11:19] }}</td>
+      <td>{{ c.end[11:19] }}</td>
+      <td><strong>{{ c.min }} min</strong></td>
+      <td>{% if c.min <= 45 %}<span style="color:#3fb950">● Fast</span>
+          {% elif c.min <= 55 %}<span style="color:#d29922">● On time</span>
+          {% else %}<span style="color:#f85149">● Slow</span>{% endif %}</td>
+    </tr>
     {% endfor %}
     </tbody>
   </table>
-  {% else %}<p style="color:#8b949e;padding:12px 0">No changeovers recorded yet today.</p>{% endif %}
+  {% else %}
+  <p style="color:#8b949e;padding:12px 0">No changeovers recorded yet today.</p>
+  {% endif %}
 </div>
+
+<!-- ── Event Timeline ── -->
+{% if d.timeline %}
+<div class="section">
+  <div class="section-title">Today's Event Timeline</div>
+  <table>
+    <thead><tr><th>Time</th><th>From</th><th>To</th><th>Puller Feet</th></tr></thead>
+    <tbody>
+    {% for ev in d.timeline %}
+    <tr>
+      <td style="font-family:monospace;font-size:.85rem;">{{ ev.time[11:] }}</td>
+      <td>{{ ev.from_state }}</td>
+      <td>{{ ev.to_state }}</td>
+      <td>{{ ev.feet }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <div class="footer">Braider 2 · :5000/floor · Refreshes every 60s · Noble Gas Systems</div>
+
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script>
+const STATE_COLORS = {
+    'RUNNING':'#66bb6a','STOPPED':'#ef5350','OFF':'#455a64',
+    'READY':'#4fc3f7','STARTING':'#26c6da','STOPPING':'#ff7043',
+    'PAUSING':'#ffb74d','PAUSED':'#ffa726','ABORTING':'#ab47bc','ABORTED':'#b71c1c'
+};
+
+function buildStateChart(divId, data) {
+    if (!data.timestamps || !data.timestamps.length) {
+        document.getElementById(divId).innerHTML =
+            '<p style="color:#8b949e;padding:20px">No data yet.</p>';
+        return;
+    }
+    const byState = {};
+    for (let i = 0; i < data.timestamps.length; i++) {
+        const s = data.states[i];
+        if (!s) continue;
+        if (!byState[s]) byState[s] = [];
+        byState[s].push(data.timestamps[i]);
+    }
+    const plotTraces = Object.entries(byState).map(([state, times]) => ({
+        x: times,
+        y: Array(times.length).fill(state),
+        mode: 'markers',
+        name: state,
+        marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
+        type: 'scatter'
+    }));
+    const layout = {
+        paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
+        font:{color:'#8b949e', size:11},
+        margin:{t:10, r:20, b:40, l:80},
+        height:220,
+        showlegend:true,
+        legend:{orientation:'h', y:-0.25, font:{size:10}},
+        xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
+        yaxis:{gridcolor:'#21262d', tickfont:{size:11}, categoryorder:'array',
+               categoryarray:['ABORTED','ABORTING','STOPPING','PAUSED','PAUSING','STOPPED','OFF','READY','STARTING','RUNNING']},
+    };
+    Plotly.newPlot(divId, plotTraces, layout, {responsive:true, displayModeBar:false});
+}
+
+function drawPie(canvasId, legendId, data) {
+    const canvas = document.getElementById(canvasId);
+    const legend = document.getElementById(legendId);
+    if (!canvas || !data.states || !data.states.length) return;
+    const counts = {};
+    for (const s of data.states) { if (s) counts[s] = (counts[s]||0) + 1; }
+    const total = Object.values(counts).reduce((a,b)=>a+b, 0);
+    if (!total) return;
+    const ORDER = ['RUNNING','OFF','STOPPED','READY','STARTING','STOPPING','PAUSING','PAUSED','ABORTING','ABORTED'];
+    const entries = ORDER.filter(s=>counts[s]).map(s=>[s,counts[s]])
+                         .concat(Object.entries(counts).filter(([s])=>!ORDER.includes(s)));
+    const ctx = canvas.getContext('2d');
+    const W=canvas.width, H=canvas.height, cx=W/2, cy=H/2, r=Math.min(W,H)/2-4;
+    ctx.clearRect(0,0,W,H);
+    let angle=-Math.PI/2, legendHTML='';
+    for (const [state,count] of entries) {
+        const sweep=(count/total)*Math.PI*2;
+        const color=STATE_COLORS[state]||'#999';
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,angle,angle+sweep);
+        ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+        ctx.strokeStyle='#0d1117'; ctx.lineWidth=1.5; ctx.stroke();
+        const pct=(count/total*100).toFixed(1), hrs=(count*2/3600).toFixed(1);
+        legendHTML+=`<div><span style="color:${color};font-weight:700;">■</span> ${state}: ${pct}% (${hrs}h)</div>`;
+        angle+=sweep;
+    }
+    ctx.beginPath(); ctx.arc(cx,cy,r*0.52,0,Math.PI*2); ctx.fillStyle='#161b22'; ctx.fill();
+    const runPct=counts['RUNNING']?(counts['RUNNING']/total*100).toFixed(0):'0';
+    ctx.fillStyle='#3fb950'; ctx.font='bold 22px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(runPct+'%',cx,cy-8);
+    ctx.fillStyle='#8b949e'; ctx.font='10px Arial'; ctx.fillText('running',cx,cy+12);
+    if (legend) legend.innerHTML=legendHTML;
+}
+
+(async function() {
+    try {
+        const [todayRes, weekRes, lastWeekRes] = await Promise.all([
+            fetch('/api/floor_data?range=today'),
+            fetch('/api/floor_data?range=week'),
+            fetch('/api/floor_data?range=lastweek'),
+        ]);
+        const todayData    = await todayRes.json();
+        const weekData     = await weekRes.json();
+        const lastWeekData = await lastWeekRes.json();
+        drawPie('todayPie',    'todayPieLegend',    todayData);
+        drawPie('weekPie',     'weekPieLegend',     weekData);
+        drawPie('lastWeekPie', 'lastWeekPieLegend', lastWeekData);
+        buildStateChart('todayChart',    todayData);
+        buildStateChart('weekChart',     weekData);
+        buildStateChart('lastWeekChart', lastWeekData);
+    } catch(e) {
+        ['todayChart','weekChart','lastWeekChart'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = '<p style="color:#8b949e;padding:20px">Chart unavailable.</p>';
+        });
+    }
+})();
+</script>
 </body>
 </html>"""
 
