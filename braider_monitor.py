@@ -4,12 +4,20 @@ Noble Gas Systems — Steeger HS120/48 IMC-7K Braider Monitor
 Raspberry Pi production logger — runs as a systemd service
 
 Logs:
-  - process_log.csv      : 2s poll, speeds + position + state + safety
-  - event_log.csv        : on state change or wire break
-  - wire_break_log.csv   : high-res 10s window around every wire break
-  - oee_log.csv          : 60s poll, cumulative state time for OEE
+  - process_log.csv      : 2s poll, fast telemetry only (speeds, position, servos)
+  - oee_log.csv          : 60s poll, cumulative state time + recipe context
+  - event_log.csv        : RBE — discrete transitions (state change, faults 0→1,
+                           wire break detected, recipe load, safety inputs, etc.)
+  - wire_break_log.csv   : one row per discrete wire break event with bobbin/carrier
+                           identification parsed from the changed bit mask
 
-Flask dashboard available at http://<pi-ip>:5000
+Archiving:
+  - process_log.csv      : weekly split every Sunday midnight (Pi clock, independent
+                           of PLC connection) via background archiver thread
+  - event_log / oee_log / wire_break_log : monthly split on 1st of month
+
+Flask dashboard at http://<pi-ip>:5000
+Floor report   at http://<pi-ip>:5000/floor
 
 Author: Joseph Patronite, Noble Gas Systems
 """
@@ -36,10 +44,13 @@ EVENT_LOG      = os.path.join(LOG_DIR, f'{BRAIDER_ID}_event_log.csv')
 WIRE_BREAK_LOG = os.path.join(LOG_DIR, f'{BRAIDER_ID}_wire_break_log.csv')
 OEE_LOG        = os.path.join(LOG_DIR, f'{BRAIDER_ID}_oee_log.csv')
 
-FAST_POLL_INTERVAL       = 2   # seconds
-OEE_POLL_INTERVAL        = 60  # seconds
+FAST_POLL_INTERVAL       = 2    # seconds
+OEE_POLL_INTERVAL        = 60   # seconds
 PRE_BREAK_BUFFER_SECONDS = 5
 POST_BREAK_CAPTURE_SECONDS = 5
+
+# Startup grace period — ignore wire bit changes while servo axes are settling
+STARTUP_GRACE_SECONDS = 5
 
 STATE_CODES = {
     1:   'OFF',
@@ -54,106 +65,124 @@ STATE_CODES = {
     512: 'ABORTED',
 }
 
-# ── Tag lists ─────────────────────────────────────────────────────────────────
+# ── Wire break bobbin / carrier mapping ───────────────────────────────────────
+# Local:1:I.Data is a 16-bit integer.  Bit 0 and 1 are the two triaxial inputs
+# (normal state = 1, break = 0).  Bits 2–15 map to the 48-carrier bobbin ring.
+# Three bits (groups of 3) correspond to one physical carrier position.
+# Adjust the mapping below to match your physical wiring sheet once confirmed.
+#
+# The bitmask read from the PLC: normal = 3 (bits 0–1 high, everything else 0).
+# A break means a bit that was HIGH goes LOW (active-low switches).
+# prev_wire_bits ^ wire_bits  → which bits changed
+# prev_wire_bits & changed    → which bits went from 1 → 0 (new break)
+# wire_bits & changed         → which bits went from 0 → 1 (cleared)
+#
+# Bit-to-carrier lookup (populate from wiring schematic):
+WIRE_BIT_TO_CARRIER = {
+    # bit_index : "Carrier_XX"
+    # 0 and 1 are the triaxial / control inputs — not bobbin wires
+    0:  'Triaxial_A',
+    1:  'Triaxial_B',
+    2:  'Carrier_01',
+    3:  'Carrier_02',
+    4:  'Carrier_03',
+    5:  'Carrier_04',
+    6:  'Carrier_05',
+    7:  'Carrier_06',
+    8:  'Carrier_07',
+    9:  'Carrier_08',
+    10: 'Carrier_09',
+    11: 'Carrier_10',
+    12: 'Carrier_11',
+    13: 'Carrier_12',
+    14: 'Carrier_13',
+    15: 'Carrier_14',
+    # extend to 47 when wiring sheet is confirmed
+}
 
-# 2s poll — process data + safety flags
+NORMAL_WIRE_BITS = 3  # both triaxial inputs high, no wire breaks
+
+# ── Tag lists ─────────────────────────────────────────────────────────────────
+#
+# FAST_TAGS — 2s process telemetry written to process_log.csv
+# Only true process signals that change frequently during production.
+# OEE/recipe/config tags have been removed — they belong in oee_log or event_log.
+
 FAST_TAGS = [
-    # Core process
+    # Core process speeds & position
     'Machine_State',
-    'Table_Actual_Speed',
     'Puller_Actual_Speed',
     'Puller_Pos_Feet',
+    'realTableSpeed',                           # filtered table rev/s (YES / process_log)
     'Table_Position',
     'Active_Segment',
-    'Current_Segment',
-    'realTableSpeed',
-    # Speeds — additional context
-    'Transition_Active',        # True during segment-to-segment speed transitions
-    # Faults and wire breaks
-    'No_Machine_Faults',
-    'No_Machine_Msgs',
-    'Machine_Faults',           # Fault bitmask — specific fault codes
-    'Local:1:I.Data',
-    'Local:1:I.Fault',
-    'WIre_Break_Detected',      # Cleaner wire break flag (note: typo in PLC tag name is intentional)
-    'Core_Break',               # Core/mandrel break detected
-    'Cam_Error',                # Cam profile calculation error
-    'Calc_Error',               # General calculation error
-    'Start_Warning.DN',          # Warning condition at run start — DN bit of timer
-    # Safety inputs — flip before state change, useful fault context
+    # Wire break detection
+    'Local:1:I.Data',                           # 16-bit wire break bitmask
+    'Local:1:I.Fault',                          # I/O module fault flag
+    'WIre_Break_Detected',                      # PLC-level break flag (typo is intentional)
+    'Core_Break',
+    # Safety inputs
     'I_Door_Interlock_Ok',
     'I_Emergency_Stop_Ok',
-    'I_Table_Motor_OL',         # Table motor overload relay — mechanical overload precursor
-    'I_CoreBreak_Sensor',       # Core break sensor input
-    'I_Triaxial_WB',            # Triaxial wire break input
+    'I_Table_Motor_OL',
+    'I_CoreBreak_Sensor',
+    'I_Triaxial_WB',
     'Machine.Estops_Ok',
     'Machine.Guards_Ok',
     'Machine.All_Safties_Ok',
     'Machine.All_Axes_Ok',
     'Machine.All_Axes_Running',
-    # Servo sync flags — pre-fault signal candidates
+    # Servo sync
     'AxisSynced_OS1',
     'AxisSynced_OS2',
     'AxisSynced_OS3',
     'AxisSynced_OS4',
     'AxisSynced_OS5',
-    # Servo/motion health
-    'Puller_Position_Error',    # Puller following error — mechanical load indicator
-    'Table_Drive:I.AtReference', # True when VFD reaches commanded speed
-    # Current state elapsed time — real-time OEE
+    # State elapsed time components
     'Current_Hours.ACC',
     'Current_Minutes.ACC',
     'Current_Seconds.ACC',
-    # Job definition
-    'Length_To_Run',            # Remaining length to complete job — production progress
-    'Run_Complete',             # True when a job run completes — production event trigger
-    # Taper sensor (Keyence IX-H2000)
-    'Taper_Sensor_Input',       # Raw sensor input — braid diameter measurement
-    'Sensor_Mode_Enable',       # Taper sensor mode active
-    'New_Part_ONS',             # New vessel start one-shot pulse
-    'New_Part_Latch',           # New vessel detection latched
-    'PPI_Change_ONS',           # PPI changed mid-run
-    # Inactivity
-    'Inactivity_Timer.ACC',     # Time machine has been idle — alert trigger
-    # VFD feedback — actual vs commanded frequency (load indicator)
+    # VFD feedback
     'Table_Drive:I.OutputFreq',
     'Table_Drive:O.FreqCommand',
     'Table_Drive:I.Faulted',
     'Table_Drive:I.Active',
+    'Table_Drive:I.AtReference',
+    # Taper sensor
+    'Taper_Sensor_Input',
+    'Sensor_Mode_Enable',
+    # Run state signals
+    'Run_Complete',
+    'Length_To_Run',
+    'Transition_Active',
+    'No_Machine_Faults',
+    'No_Machine_Msgs',
+    'Machine_Faults',
     # Wire break recovery
-    'WireBreak_Move',           # Distance machine backed up after wire break
-    'EStop_Recover',            # E-stop recovery sequence active
-    # Program-scoped tags
-    'Program:P01_TableDrive.Abs_Value_Peak',        # Peak table drive current — motor load signal
-    'Program:P01_TableDrive.Ave_Current_Data',      # Rolling average current (PLC calculation)
-    'Program:P01_TableDrive.Ave_Current_Index',     # Averaging index counter
-    'Program:P01_TableDrive.Servo_Axis_Faults',     # Servo fault code
-    'Program:MainProgram.Fault_WireBreak',          # Wire break fault flag
-    'Program:MainProgram.Fault_EStop',              # E-stop fault flag
-    'Program:MainProgram.Fault_GuardDoor',          # Guard door fault flag
-    'Program:MainProgram.Fault_PullerServo',        # Puller servo fault flag
-    'Program:MainProgram.Fault_TableServo',         # Table servo fault flag
-    'Program:MainProgram.Recover_Step',             # Wire break recovery step
-    'Program:MainProgram.Puller_Current_Dist',      # Puller distance this segment
-    'Program:MainProgram.Table_Current_Dist',       # Table distance this segment
-    'Program:MainProgram.StateMirror',              # Machine state mirror
-    # Additional useful tags from full scan analysis
-    'Sequence_Step',                    # Internal state machine step counter
-    'Machine_Msg_Scroll',               # HMI message code cycling
-    'Recover_Position',                 # Position machine backs up to on wire break recovery
-    'Load_New_Cam',                     # Fires when new cam profile loaded (segment transition)
-    'O_Lamp_Green_Machine_Running',     # Physical green lamp — clean running indicator
-    'O_Lamp_Red_Machine_Stopped',       # Physical red lamp — clean stopped indicator
-    'Ok_To_Jog',                        # Jog permission flag
-    'I_Pushbutton_Jog_Table_Fwd',       # Jog forward button
-    'I_Pushbutton_Jog_Table_Rev',       # Jog reverse button
-    'I_Pushbutton_Start',               # Start button
-    'TablePos_EndofSeg',                # Table position at end of current segment
-    'TablePos_EndofLastSeg',            # Table position at end of last segment
-    'Master_No_Motion',                 # Master no-motion flag
+    'WireBreak_Move',
+    'EStop_Recover',
+    # Program-scoped — segment progress & recovery (always polled, log in process_log)
+    'Program:MainProgram.Fault_WireBreak',
+    'Program:MainProgram.Fault_EStop',
+    'Program:MainProgram.Fault_GuardDoor',
+    'Program:MainProgram.Fault_PullerServo',
+    'Program:MainProgram.Fault_TableServo',
+    'Program:MainProgram.Recover_Step',
+    'Program:MainProgram.Puller_Current_Dist',
+    'Program:MainProgram.Table_Current_Dist',
+    'Program:P01_TableDrive.Servo_Axis_Faults',
+    # Servo axis sub-tags for process log & wire break pre-detection research
+    'servoPuller_Axis.ActualPosition',
+    'servoPuller_Axis.CommandPosition',
+    'servoPuller_Axis.ActualVelocity',
+    'servoPuller_Axis.CommandVelocity',
+    'servoPuller_Axis.MotionStatus',
+    'servoTable_Axis.VelocityFeedback',         # raw encoder — wire break pre-detection
 ]
 
-# 60s poll — OEE accumulators + recipe
+# OEE_TAGS — 60s poll written to oee_log.csv
+# Recipe params and lifetime accumulators. Not included in FAST_TAGS to keep
+# the 2s packet small.
 OEE_TAGS = [
     'Machine_Statistics',
     'CurrentRecipe',
@@ -163,30 +192,50 @@ OEE_TAGS = [
     'HMI_Mandrel_Mode',
     'PowerOn_Days.ACC',
     'PowerOn_Hours.ACC',
-    'Triaxial_Enable',          # Whether triaxial detection is active this recipe
-    'ABORTED_Hours.ACC',        # Time spent in fault state — downtime analysis
-    'ABORTING_Hours.ACC',       # Time spent in fault recovery
-    'TOTAL_RUNNING_Hours.ACC',  # Alternate running hours counter
-    # Job definition — slow changing, set at recipe load
-    'Discrete_Distance',        # Target vessel length in feet
-    'Discrete_Loops',           # Number of braid passes
-    'Loop_Length_Feet',         # Length per loop
-    'Carrier_Mode',             # Carrier configuration mode
-    'Current_Ratio',            # Current gear ratio
-    'Low_PPI',                  # Low PPI for mandrel mode
-    'Hi_PPI',                   # High PPI for mandrel mode
-    'Hi_PPI_Running',           # Whether high PPI pass is active
-    'Active_Segment',           # Current active segment — needed for live PPI lookup
+    'Triaxial_Enable',
+    'Active_Segment',
+    # Recipe params (slow-changing)
+    'Discrete_Distance',
+    'Discrete_Loops',
+    'Loop_Length_Feet',
+    'Carrier_Mode',
+    'Current_Ratio',
+    'Low_PPI',
+    'Hi_PPI',
+    'Hi_PPI_Running',
+    'Base_Ratio',
 ]
 
-# Tags to watch for fault events — logged to event_log on change
-FAULT_TAGS = [
+# CHANGE_TAGS — RBE tags written to event_log only on 0→1 or 1→0 transition.
+# These are the 11 tags previously being polled every 2s into event_log.
+# All are BOOLs unless otherwise noted.
+CHANGE_TAGS = [
     'Fault_9',
     'Fault_13',
-    'Fault_14',
-    'Fault_16',
     'Fault_Cam',
     'Fault_Calc',
+    'Core_Break',
+    'EStop_Recover',
+    'I_Table_Motor_OL',
+    'I_Door_Interlock_Ok',
+    'I_Emergency_Stop_Ok',
+    'I_CoreBreak_Sensor',
+    'I_Triaxial_WB',
+    'Table_Drive:I.Faulted',
+    'AxisSynced_OS1',
+    'AxisSynced_OS2',
+    'AxisSynced_OS3',
+    'AxisSynced_OS4',
+    'AxisSynced_OS5',
+    'WIre_Break_Detected',
+    'Puller_Position_Error',
+    'New_Part_Latch',
+    'Run_Complete',
+    'Transition_Active',
+    'PPI_Change_ONS',
+    'Sensor_Mode_Enable',
+    # Machine_Faults is a DINT — compare on any non-zero value change
+    'Machine_Faults',
 ]
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -197,7 +246,7 @@ LOG_FILE = os.path.join(os.path.expanduser('~'), 'braider_monitor.log')
 
 _rotating_handler = RotatingFileHandler(
     LOG_FILE,
-    maxBytes=5 * 1024 * 1024,  # 5MB per file
+    maxBytes=5 * 1024 * 1024,
     backupCount=3
 )
 _rotating_handler.setFormatter(logging.Formatter('%(asctime)s  %(levelname)s  %(message)s'))
@@ -223,11 +272,34 @@ def state_name(code):
     return STATE_CODES.get(code, f'UNKNOWN({code})')
 
 
-def archive_logs():
-    from datetime import datetime
-    now = datetime.now()
+# ── Independent archiver thread ───────────────────────────────────────────────
+# Runs entirely off the Pi's system clock.  The PLC loop has zero involvement.
+# Sunday midnight  → weekly split of process_log.csv
+# 1st of month     → monthly split of event_log, oee_log, wire_break_log
 
-    is_sunday_midnight   = (now.weekday() == 6 and now.hour == 0 and now.minute == 0)
+_last_archive_check_minute = -1   # guards against multiple fires in same minute
+
+
+def independent_archiver_loop():
+    """Background thread: checks wall-clock every 30 s and archives when needed."""
+    global _last_archive_check_minute
+    log.info('Archiver thread started.')
+    while True:
+        try:
+            now = datetime.now()
+            minute_key = (now.year, now.month, now.day, now.hour, now.minute)
+
+            if minute_key != _last_archive_check_minute:
+                _last_archive_check_minute = minute_key
+                _run_archive_checks(now)
+        except Exception as e:
+            log.error(f'Archiver thread error: {e}')
+        time.sleep(30)
+
+
+def _run_archive_checks(now: datetime):
+    """Execute file rotations if calendar conditions are met."""
+    is_sunday_midnight     = (now.weekday() == 6 and now.hour == 0 and now.minute == 0)
     is_monthstart_midnight = (now.day == 1 and now.hour == 0 and now.minute == 0)
 
     archived_any = False
@@ -236,35 +308,56 @@ def archive_logs():
         week_label = now.strftime('%Y_%m_%d')
         if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
             archive_name = PROCESS_LOG.replace('.csv', f'_week_ending_{week_label}.csv')
-            os.rename(PROCESS_LOG, archive_name)
-            log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} -> {os.path.basename(archive_name)}')
-            archived_any = True
+            try:
+                os.rename(PROCESS_LOG, archive_name)
+                log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} → {os.path.basename(archive_name)}')
+                archived_any = True
+            except OSError as e:
+                log.error(f'Weekly archive failed: {e}')
 
     if is_monthstart_midnight:
         month_label = now.strftime('%Y_%m')
         for filepath in [EVENT_LOG, OEE_LOG, WIRE_BREAK_LOG]:
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 archive_name = filepath.replace('.csv', f'_{month_label}.csv')
-                os.rename(filepath, archive_name)
-                log.info(f'Monthly archive: {os.path.basename(filepath)} -> {os.path.basename(archive_name)}')
-                archived_any = True
+                try:
+                    os.rename(filepath, archive_name)
+                    log.info(f'Monthly archive: {os.path.basename(filepath)} → {os.path.basename(archive_name)}')
+                    archived_any = True
+                except OSError as e:
+                    log.error(f'Monthly archive failed for {filepath}: {e}')
 
     if archived_any:
-        log.info('Archive complete')
+        log.info('Archive pass complete.')
 
+
+# ── CSV writer with instant column-update archive ────────────────────────────
 
 def write_csv_row(filepath, row: dict):
+    """
+    Append a dict as a CSV row.  If the column schema has changed since the
+    file was created (i.e. a FAST_TAGS edit mid-run), the old file is
+    immediately archived with a timestamp and a fresh file is started.
+    """
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
 
     if file_exists:
-        with open(filepath, 'r', newline='') as f:
-            existing_headers = f.readline().strip().split(',')
-        new_headers = list(row.keys())
-        if existing_headers != new_headers:
-            from datetime import datetime
-            archive_name = filepath.replace('.csv', f'_archived_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
-            os.rename(filepath, archive_name)
-            log.warning(f'Column mismatch detected — archived old file to {os.path.basename(archive_name)}')
+        try:
+            with open(filepath, 'r', newline='') as f:
+                existing_headers = f.readline().strip().split(',')
+            new_headers = list(row.keys())
+            if existing_headers != new_headers:
+                archive_name = filepath.replace(
+                    '.csv',
+                    f'_archived_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+                )
+                os.rename(filepath, archive_name)
+                log.warning(
+                    f'Column mismatch — archived {os.path.basename(filepath)} '
+                    f'→ {os.path.basename(archive_name)}'
+                )
+                file_exists = False
+        except OSError:
             file_exists = False
 
     with open(filepath, 'a', newline='') as f:
@@ -273,92 +366,102 @@ def write_csv_row(filepath, row: dict):
             writer.writeheader()
         writer.writerow(row)
 
+
+# ── Wire break parser ──────────────────────────────────────────────────────────
+
+def parse_broken_carriers(changed_mask: int, new_breaks_mask: int) -> list[dict]:
+    """
+    Given the XOR mask of changed bits and the subset that went 0 (broken),
+    return a list of dicts — one per broken bit — with carrier identification.
+
+    changed_mask   : prev ^ current  (all bits that flipped)
+    new_breaks_mask: prev & changed  (bits that went 1→0, i.e. active-low break)
+    """
+    carriers = []
+    for bit_index in range(16):
+        if new_breaks_mask & (1 << bit_index):
+            label = WIRE_BIT_TO_CARRIER.get(bit_index, f'Bit_{bit_index}')
+            carriers.append({
+                'bit_index': bit_index,
+                'carrier':   label,
+            })
+    return carriers
+
+
+# ── Daily utilization helper ──────────────────────────────────────────────────
+
 def calculate_daily_state_percentages():
     """
-    Reads the process_log.csv from the bottom up, filters for rows matching 
-    the current calendar day, and calculates the percentage of time spent in each state.
+    Reads process_log.csv bottom-up and today's archived files to calculate
+    state percentage breakdown for the current calendar day.
     """
-    import os
-    if not os.path.exists(PROCESS_LOG) or os.path.getsize(PROCESS_LOG) == 0:
-        return {}
-
+    import glob
     today_str = datetime.now().strftime('%Y-%m-%d')
     state_counts = {}
     total_rows = 0
 
-    # Read backward in chunks to optimize Pi memory usage
-    with open(PROCESS_LOG, 'rb') as f:
-        try:
-            f.seek(0, os.SEEK_END)
-            position = f.tell()
-            buffer = bytearray()
-            chunk_size = 4096
-            done = False
+    # Scan live file bottom-up
+    if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
+        with open(PROCESS_LOG, 'rb') as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                position = f.tell()
+                buffer = bytearray()
+                chunk_size = 4096
+                done = False
 
-            while position > 0 and not done:
-                if position - chunk_size > 0:
-                    position -= chunk_size
-                    f.seek(position)
-                    chunk = f.read(chunk_size)
-                else:
-                    chunk = f.read(position)
-                    position = 0
-                
-                buffer = chunk + buffer
-                lines = buffer.split(b'\n')
-                
-                # Keep the incomplete first line for the next iteration
-                if position > 0:
-                    buffer = lines[0]
-                    lines = lines[1:]
-                else:
-                    buffer = bytearray()
+                while position > 0 and not done:
+                    if position - chunk_size > 0:
+                        position -= chunk_size
+                        f.seek(position)
+                        chunk = f.read(chunk_size)
+                    else:
+                        chunk = f.read(position)
+                        position = 0
 
-                for line in reversed(lines):
-                    line_str = line.decode('utf-8', errors='ignore').strip()
-                    if not line_str or line_str.startswith('Timestamp'):
-                        continue
-                    
-                    parts = line_str.split(',')
-                    if len(parts) > 2:
-                        row_timestamp = parts[0] # YYYY-MM-DD HH:MM:SS
-                        if row_timestamp.startswith(today_str):
-                            state_name = parts[3] # State_Name column
-                            if state_name:
-                                state_counts[state_name] = state_counts.get(state_name, 0) + 1
-                                total_rows += 1
-                        else:
-                            # We found a row from yesterday! We can safely stop scanning.
-                            done = True
-                            break
-        except Exception as e:
-            log.error(f"Error calculating daily OEE percentages: {e}")
-            return {}
+                    buffer = chunk + buffer
+                    lines = buffer.split(b'\n')
 
-    if total_rows == 0:
-        return {}
+                    if position > 0:
+                        buffer = lines[0]
+                        lines = lines[1:]
+                    else:
+                        buffer = bytearray()
 
-    # Also check archived files from today (handles mid-shift restarts)
-    import glob
+                    for line in reversed(lines):
+                        line_str = line.decode('utf-8', errors='ignore').strip()
+                        if not line_str or line_str.startswith('Timestamp'):
+                            continue
+                        parts = line_str.split(',')
+                        if len(parts) > 3:
+                            row_timestamp = parts[0]
+                            if row_timestamp.startswith(today_str):
+                                sname = parts[3]
+                                if sname:
+                                    state_counts[sname] = state_counts.get(sname, 0) + 1
+                                    total_rows += 1
+                            else:
+                                done = True
+                                break
+            except Exception as e:
+                log.error(f'Daily OEE calc error: {e}')
+
+    # Add any mid-shift archived files from today
     today_compact = datetime.now().strftime('%Y%m%d')
     base = PROCESS_LOG.replace('.csv', '')
     for archive in sorted(glob.glob(base + '_archived_' + today_compact + '*.csv')):
         try:
             with open(archive, newline='', encoding='utf-8', errors='replace') as af:
-                import csv as _csv
-                for row in _csv.DictReader(af):
-                    ts = row.get('Timestamp', '')
-                    if ts.startswith(today_str):
-                        state = row.get('State_Name', 'UNKNOWN') or 'UNKNOWN'
-                        state_counts[state] = state_counts.get(state, 0) + 1
+                for row in csv.DictReader(af):
+                    if row.get('Timestamp', '').startswith(today_str):
+                        sname = row.get('State_Name', 'UNKNOWN') or 'UNKNOWN'
+                        state_counts[sname] = state_counts.get(sname, 0) + 1
                         total_rows += 1
         except Exception:
             pass
 
     if total_rows == 0:
         return {}
-
-    # Convert counts to exact percentages
     return {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
 
 
@@ -366,130 +469,120 @@ def calculate_daily_state_percentages():
 
 _lock = threading.Lock()
 _latest = {
-    'timestamp':         None,
-    'machine_state':     None,
-    'state_name':        None,
-    'table_speed':       None,
-    'puller_speed':      None,
-    'puller_pos_feet':   None,
-    'table_position':    None,
-    'active_segment':    None,
-    'no_faults':         None,
-    'wire_break_bits':   None,
-    'recipe_name':       None,
-    'recipe_ppi':        None,
-    # Safety
-    'door_ok':           None,
-    'estop_ok':          None,
-    'guards_ok':         None,
-    'all_axes_running':  None,
-    # Servo sync
-    'axis1_synced':      None,
-    'axis2_synced':      None,
-    'axis3_synced':      None,
-    'axis4_synced':      None,
-    'axis5_synced':      None,
-    # Current state time
-    'current_state_hrs':  None,
-    'current_state_mins': None,
-    'current_state_secs': None,
-    # Job
-    'discrete_distance': None,
-    'discrete_loops':    None,
-    # OEE
-    'cum_running_hrs':   None,
-    'cum_stopped_hrs':   None,
-    'cum_ready_hrs':     None,
-    'recipe_modified':   None,
-    'mandrel_mode':      None,
-    # Process
-    'taper_sensor':      None,
-    'sequence_step':      None,
-    'recover_position':   None,
-    'lamp_running':       None,
-    'lamp_stopped':       None,
-    'ok_to_jog':          None,
-    'jog_fwd':            None,
-    'jog_rev':            None,
-    'start_pb':           None,
-    'master_no_motion':   None,
-    'machine_msg_scroll': None,
-    'tablepos_endofseg':  None,
-    'tablepos_endoflastseg': None,
-    'puller_vel_cmd_err': None,
-    'puller_current_dist':None,
-    'table_current_dist': None,
-    'fault_wire_break':   None,
-    'fault_estop':        None,
-    'fault_puller_servo': None,
-    'fault_table_servo':  None,
-    'recover_step':       None,
-    'puller_servo_ok':    None,
-    'table_servo_ok':     None,
-    'group_fault':        None,
-    'group_status':       None,
-    'speed_ratio':       None,
-    'table_vel_error':   None,
-    'puller_vel_error':  None,
-    'table_actual_vel':  None,
-    'puller_actual_vel': None,
-    'table_actual_accel':None,
-    'puller_actual_accel':None,
-    'table_motion_status':None,
-    'puller_motion_status':None,
-    'group_status':      None,
-    'group_fault':       None,
-    'abs_value_peak':    None,
-    'ave_current_data':  None,
-    'fault_wire_break':  None,
-    'fault_estop':       None,
-    'recover_step':      None,
-    'puller_current_dist':None,
-    'table_current_dist':None,
-    'machine_faults':    None,
-    'no_msgs':           None,
-    'state_elapsed_s':   None,
-    'vfd_freq_actual':   None,
-    'vfd_freq_command':  None,
-    'vfd_freq_delta':    None,
-    'vfd_at_ref':        None,
-    'vfd_faulted':       None,
-    'vfd_active':        None,
-    'i_table_motor_ol':  None,
-    'i_triaxial_wb':     None,
-    'core_break':        None,
-    'all_safties_ok':    None,
-    'all_axes_ok':       None,
-    'puller_pos_error':  None,
-    'inactivity_secs':   None,
-    'new_part':          None,
-    'run_complete':      None,
-    'length_to_run':     None,
-    'wire_break_move':   None,
-    'estop_recover':     None,
-    'connected':         False,
-    'last_error':        None,
+    'timestamp':              None,
+    'machine_state':          None,
+    'state_name':             None,
+    'table_speed':            None,
+    'puller_speed':           None,
+    'puller_pos_feet':        None,
+    'table_position':         None,
+    'active_segment':         None,
+    'no_faults':              None,
+    'wire_break_bits':        None,
+    'recipe_name':            None,
+    'recipe_ppi':             None,
+    'door_ok':                None,
+    'estop_ok':               None,
+    'guards_ok':              None,
+    'all_axes_running':       None,
+    'axis1_synced':           None,
+    'axis2_synced':           None,
+    'axis3_synced':           None,
+    'axis4_synced':           None,
+    'axis5_synced':           None,
+    'current_state_hrs':      None,
+    'current_state_mins':     None,
+    'current_state_secs':     None,
+    'state_elapsed_s':        None,
+    'cum_running_hrs':        None,
+    'cum_stopped_hrs':        None,
+    'cum_ready_hrs':          None,
+    'recipe_modified':        None,
+    'mandrel_mode':           None,
+    'taper_sensor':           None,
+    'sensor_mode':            None,
+    'sequence_step':          None,
+    'recover_position':       None,
+    'lamp_running':           None,
+    'lamp_stopped':           None,
+    'ok_to_jog':              None,
+    'jog_fwd':                None,
+    'jog_rev':                None,
+    'start_pb':               None,
+    'master_no_motion':       None,
+    'machine_msg_scroll':     None,
+    'tablepos_endofseg':      None,
+    'tablepos_endoflastseg':  None,
+    'puller_vel_cmd_err':     None,
+    'puller_current_dist':    None,
+    'table_current_dist':     None,
+    'fault_wire_break':       None,
+    'fault_estop':            None,
+    'fault_puller_servo':     None,
+    'fault_table_servo':      None,
+    'recover_step':           None,
+    'puller_servo_ok':        None,
+    'table_servo_ok':         None,
+    'group_fault':            None,
+    'group_status':           None,
+    'speed_ratio':            None,
+    'machine_faults':         None,
+    'no_msgs':                None,
+    'vfd_freq_actual':        None,
+    'vfd_freq_command':       None,
+    'vfd_freq_delta':         None,
+    'vfd_at_ref':             None,
+    'vfd_faulted':            None,
+    'vfd_active':             None,
+    'i_table_motor_ol':       None,
+    'i_triaxial_wb':          None,
+    'core_break':             None,
+    'all_safties_ok':         None,
+    'all_axes_ok':            None,
+    'puller_pos_error':       None,
+    'new_part':               None,
+    'run_complete':           None,
+    'length_to_run':          None,
+    'wire_break_move':        None,
+    'estop_recover':          None,
+    'abs_value_peak':         None,
+    'ave_current_data':       None,
+    'servo_axis_faults':      None,
+    'puller_actual_vel':      None,
+    'puller_cmd_vel':         None,
+    'puller_actual_pos':      None,
+    'puller_cmd_pos':         None,
+    'puller_motion_status':   None,
+    'table_vel_feedback':     None,
+    'connected':              False,
+    'last_error':             None,
+    'daily_state_pcts':       {},
 }
 
 _rolling_buffer = deque(maxlen=int(PRE_BREAK_BUFFER_SECONDS / FAST_POLL_INTERVAL) + 5)
-_wire_break_capturing = False
-_wire_break_capture_until = 0
-_wire_break_capture_rows = []
+
+# Wire break capture state
+_wb_capturing        = False
+_wb_capture_until    = 0.0
+_wb_capture_rows     = []
 
 
 # ── Monitor loop ──────────────────────────────────────────────────────────────
 
 def monitor_loop():
-    global _wire_break_capturing, _wire_break_capture_until, _wire_break_capture_rows
+    global _wb_capturing, _wb_capture_until, _wb_capture_rows
 
-    prev_state          = None
-    prev_wire_bits      = None
-    last_oee_poll       = 0
-    recipe_name         = 'Unknown'
-    running_started_at  = None   
-    recipe_ppi          = None
+    prev_state     = None
+    prev_wire_bits = None
+    prev_change    = {}   # {tag_name: last_logged_value} for RBE change tracking
+    last_oee_poll  = 0
+    recipe_name    = 'Unknown'
+    recipe_ppi     = None
+    running_started_at = None
 
-    log.info(f'Starting monitor loop -> PLC {PLC_IP}')
+    monitor_loop._retry_count = 0
+
+    log.info(f'Starting monitor loop → PLC {PLC_IP}')
 
     while True:
         try:
@@ -497,11 +590,11 @@ def monitor_loop():
                 if not plc.connected:
                     raise ConnectionError('LogixDriver connected=False')
 
-                log.info('Connected to PLC')
-                monitor_loop._retry_count = 0  
+                log.info('PLC connected.')
+                monitor_loop._retry_count = 0
                 with _lock:
-                    _latest['connected'] = True
-                    _latest['last_error'] = None
+                    _latest['connected']   = True
+                    _latest['last_error']  = None
 
                 while True:
                     now       = time.time()
@@ -512,13 +605,13 @@ def monitor_loop():
                     d = {r.tag: r.value for r in results if r.error is None}
 
                     machine_state = d.get('Machine_State')
-                    table_speed   = d.get('Table_Actual_Speed')
                     puller_speed  = d.get('Puller_Actual_Speed')
                     puller_feet   = d.get('Puller_Pos_Feet')
                     table_pos     = d.get('Table_Position')
                     active_seg    = d.get('Active_Segment')
                     no_faults     = d.get('No_Machine_Faults')
                     wire_bits     = d.get('Local:1:I.Data')
+                    table_speed   = d.get('realTableSpeed')      # filtered table rev/s
 
                     speed_ratio = None
                     if table_speed and puller_speed and table_speed > 0:
@@ -531,7 +624,13 @@ def monitor_loop():
                     if ch is not None and cm is not None and cs is not None:
                         state_elapsed_s = (ch * 3600) + (cm * 60) + round(cs / 1000, 1)
 
-                    # ── OEE poll (Runs instantly on first loop connection) ────
+                    puller_vel_cmd_err = None
+                    pav = d.get('servoPuller_Axis.ActualVelocity')
+                    pcv = d.get('servoPuller_Axis.CommandVelocity')
+                    if pcv is not None and pav is not None:
+                        puller_vel_cmd_err = pcv - pav
+
+                    # ── OEE poll (first loop + every 60s) ───────────────────
                     cum_running = cum_stopped = cum_ready = None
                     recipe_modified = mandrel_mode = None
 
@@ -549,29 +648,23 @@ def monitor_loop():
 
                         recipe_raw = od.get('CurrentRecipe', {})
                         if isinstance(recipe_raw, dict):
-                            recipe_name     = recipe_raw.get('Name', 'Unknown')
+                            recipe_name = recipe_raw.get('Name', 'Unknown')
 
-                            # PPI selection — use active segment's Picks value for live PPI
-                            # Falls back to Connector_PPI then Body_PPI if segment data unavailable
-                            mandrel_mode_val = od.get('HMI_Mandrel_Mode')
                             hi_ppi     = od.get('Hi_PPI')
                             low_ppi    = od.get('Low_PPI')
                             hi_running = od.get('Hi_PPI_Running')
-
-                            # Always use active segment Picks as live PPI — most accurate
-                            # Hi_PPI_Running overrides when high-density pass is active
                             try:
                                 if hi_running == 1 and hi_ppi is not None:
                                     recipe_ppi = hi_ppi
                                 else:
                                     segments   = recipe_raw.get('Segments', [])
-                                    active_seg = od.get('Active_Segment') or 1
-                                    seg_data   = segments[int(active_seg)] if segments else None
+                                    seg_idx    = int(od.get('Active_Segment') or 1)
+                                    seg_data   = segments[seg_idx] if segments else None
                                     seg_picks  = seg_data.get('Picks') if seg_data else None
                                     recipe_ppi = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
                             except Exception:
                                 recipe_ppi = recipe_raw.get('Connector_PPI')
-                            
+
                             recipe_modified = od.get('Recipe_Modified')
                             mandrel_mode    = od.get('HMI_Mandrel_Mode')
 
@@ -579,11 +672,6 @@ def monitor_loop():
                             'Timestamp':          timestamp,
                             'Braider_ID':         BRAIDER_ID,
                             'Machine_State':      machine_state,
-                            'Discrete_Distance':  od.get('Discrete_Distance'),
-                            'Discrete_Loops':     od.get('Discrete_Loops'),
-                            'Loop_Length_Feet':   od.get('Loop_Length_Feet'),
-                            'Carrier_Mode':       od.get('Carrier_Mode'),
-                            'Current_Ratio':      od.get('Current_Ratio'),
                             'State_Name':         state_name(machine_state) if machine_state else '',
                             'Recipe_Name':        recipe_name,
                             'Recipe_Number':      od.get('HMI_Recipe_Number'),
@@ -591,6 +679,15 @@ def monitor_loop():
                             'Recipe_Modified':    recipe_modified,
                             'Mandrel_Mode':       mandrel_mode,
                             'Carriers':           od.get('HMI_NumberCarriers'),
+                            'Discrete_Distance':  od.get('Discrete_Distance'),
+                            'Discrete_Loops':     od.get('Discrete_Loops'),
+                            'Loop_Length_Feet':   od.get('Loop_Length_Feet'),
+                            'Carrier_Mode':       od.get('Carrier_Mode'),
+                            'Current_Ratio':      od.get('Current_Ratio'),
+                            'Base_Ratio':         od.get('Base_Ratio'),
+                            'Low_PPI':            od.get('Low_PPI'),
+                            'Hi_PPI':             od.get('Hi_PPI'),
+                            'Triaxial_Enable':    od.get('Triaxial_Enable'),
                             'PowerOn_Days':       od.get('PowerOn_Days.ACC'),
                             'PowerOn_Hours':      od.get('PowerOn_Hours.ACC'),
                             'Cum_Running_Hrs':    cum_running,
@@ -604,136 +701,137 @@ def monitor_loop():
 
                     # ── Process log row ──────────────────────────────────────
                     process_row = {
-                        'Timestamp':          timestamp,
-                        'Braider_ID':         BRAIDER_ID,
-                        'Machine_State':      machine_state,
-                        'State_Name':         state_name(machine_state) if machine_state else '',
-                        'Table_Speed':        round(table_speed,  6) if table_speed  else None,
-                        'Puller_Speed':       round(puller_speed, 6) if puller_speed else None,
-                        'Speed_Ratio':        speed_ratio,
-                        'Puller_Pos_Feet':    round(puller_feet,  4) if puller_feet  else None,
-                        'Table_Position':     round(table_pos,    4) if table_pos    else None,
-                        'Active_Segment':     active_seg,
-                        'Current_Segment':    d.get('Current_Segment'),
-                        'State_Elapsed_Secs': state_elapsed_s,
-                        'No_Faults':          no_faults,
-                        'No_Msgs':            d.get('No_Machine_Msgs'),
-                        'Wire_Break_Bits':    wire_bits,
-                        'Wire_Input_Fault':   d.get('Local:1:I.Fault'),
-                        'Door_Ok':            d.get('I_Door_Interlock_Ok'),
-                        'Estop_Ok':           d.get('I_Emergency_Stop_Ok'),
-                        'Guards_Ok':          d.get('Machine.Guards_Ok'),
-                        'All_Safties_Ok':     d.get('Machine.All_Safties_Ok'),
-                        'All_Axes_Ok':        d.get('Machine.All_Axes_Ok'),
-                        'All_Axes_Running':   d.get('Machine.All_Axes_Running'),
-                        'AxisSynced_1':       d.get('AxisSynced_OS1'),
-                        'AxisSynced_2':       d.get('AxisSynced_OS2'),
-                        'AxisSynced_3':       d.get('AxisSynced_OS3'),
-                        'AxisSynced_4':       d.get('AxisSynced_OS4'),
-                        'AxisSynced_5':       d.get('AxisSynced_OS5'),
-                        'Recipe_Name':        recipe_name,
-                        'Recipe_PPI':         recipe_ppi,
-                        'VFD_Freq_Actual':    d.get('Table_Drive:I.OutputFreq'),
-                        'VFD_Freq_Command':   d.get('Table_Drive:O.FreqCommand'),
-                        'VFD_Freq_Delta':     (d.get('Table_Drive:O.FreqCommand', 0) or 0) - (d.get('Table_Drive:I.OutputFreq', 0) or 0),
-                        'VFD_Faulted':        d.get('Table_Drive:I.Faulted'),
-                        'VFD_Active':         d.get('Table_Drive:I.Active'),
-                        'VFD_AtReference':    d.get('Table_Drive:I.AtReference'),
-                        'Transition_Active':  d.get('Transition_Active'),
-                        'Machine_Faults':     d.get('Machine_Faults'),
-                        'Wire_Break_Detected':d.get('WIre_Break_Detected'),
-                        'Core_Break':         d.get('Core_Break'),
-                        'Cam_Error':          d.get('Cam_Error'),
-                        'Calc_Error':         d.get('Calc_Error'),
-                        'Start_Warning':      d.get('Start_Warning.DN'),
-                        'I_Table_Motor_OL':   d.get('I_Table_Motor_OL'),
-                        'I_CoreBreak_Sensor': d.get('I_CoreBreak_Sensor'),
-                        'I_Triaxial_WB':      d.get('I_Triaxial_WB'),
-                        'Puller_Pos_Error':   d.get('Puller_Position_Error'),
-                        'Length_To_Run':      d.get('Length_To_Run'),
-                        'Run_Complete':       d.get('Run_Complete'),
-                        'Taper_Sensor':       d.get('Taper_Sensor_Input'),
-                        'Sensor_Mode':        d.get('Sensor_Mode_Enable'),
-                        'New_Part':           d.get('New_Part_Latch'),
-                        'PPI_Change':         d.get('PPI_Change_ONS'),
-                        'Inactivity_Secs':    d.get('Inactivity_Timer.ACC'),
-                        'WireBreak_Move':     d.get('WireBreak_Move'),
-                        'EStop_Recover':      d.get('EStop_Recover'),
-                    # Program-scoped tags
-                    'Abs_Value_Peak':        d.get('Program:P01_TableDrive.Abs_Value_Peak'),
-                    'Ave_Current_Data':      d.get('Program:P01_TableDrive.Ave_Current_Data'),
-                    'Servo_Axis_Faults':     d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
-                    'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
-                    'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
-                    'Fault_GuardDoor':       d.get('Program:MainProgram.Fault_GuardDoor'),
-                    'Fault_PullerServo':     d.get('Program:MainProgram.Fault_PullerServo'),
-                    'Fault_TableServo':      d.get('Program:MainProgram.Fault_TableServo'),
-                    'Recover_Step':          d.get('Program:MainProgram.Recover_Step'),
-                    'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
-                    'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
-                    'StateMirror':           d.get('Program:MainProgram.StateMirror'),
-                    # Additional tags
-                    'Sequence_Step':         d.get('Sequence_Step'),
-                    'Machine_Msg_Scroll':    d.get('Machine_Msg_Scroll'),
-                    'Recover_Position':      d.get('Recover_Position'),
-                    'Load_New_Cam':          d.get('Load_New_Cam'),
-                    'Lamp_Running':          d.get('O_Lamp_Green_Machine_Running'),
-                    'Lamp_Stopped':          d.get('O_Lamp_Red_Machine_Stopped'),
-                    'Ok_To_Jog':             d.get('Ok_To_Jog'),
-                    'Jog_Fwd':               d.get('I_Pushbutton_Jog_Table_Fwd'),
-                    'Jog_Rev':               d.get('I_Pushbutton_Jog_Table_Rev'),
-                    'Start_PB':              d.get('I_Pushbutton_Start'),
-                    'TablePos_EndofSeg':     d.get('TablePos_EndofSeg'),
-                    'TablePos_EndofLastSeg': d.get('TablePos_EndofLastSeg'),
-                    'Master_No_Motion':      d.get('Master_No_Motion'),
-                    # Puller servo velocity error — calculated
-                    'Puller_Vel_Cmd_Err':    (
-                        (d.get('servoPuller_Axis.CommandVelocity') or 0) -
-                        (d.get('servoPuller_Axis.ActualVelocity') or 0)
-                    ) if d.get('servoPuller_Axis.CommandVelocity') is not None else None,
-                    # Servo status
-                    'Puller_Servo_Ok':       d.get('Puller_Servo_Status.Ok'),
-                    'Puller_Servo_State':    d.get('Puller_Servo_Status.State'),
-                    'Table_Servo_Ok':        d.get('Table_Servo_Status.Ok'),
-                    'Table_Servo_State':     d.get('Table_Servo_Status.State'),
-                    'Group_Status':          d.get('servoBraider_Group.GroupStatus'),
-                    'Group_Fault':           d.get('servoBraider_Group.GroupFault'),
+                        'Timestamp':             timestamp,
+                        'Braider_ID':            BRAIDER_ID,
+                        'Machine_State':         machine_state,
+                        'State_Name':            state_name(machine_state) if machine_state else '',
+                        'Table_Speed':           round(table_speed, 6)  if table_speed  else None,
+                        'Puller_Speed':          round(puller_speed, 6) if puller_speed else None,
+                        'Speed_Ratio':           speed_ratio,
+                        'Puller_Pos_Feet':       round(puller_feet, 4)  if puller_feet  else None,
+                        'Table_Position':        round(table_pos, 4)    if table_pos    else None,
+                        'Active_Segment':        active_seg,
+                        'State_Elapsed_Secs':    state_elapsed_s,
+                        'No_Faults':             no_faults,
+                        'No_Msgs':               d.get('No_Machine_Msgs'),
+                        'Machine_Faults':        d.get('Machine_Faults'),
+                        'Wire_Break_Bits':       wire_bits,
+                        'Wire_Input_Fault':      d.get('Local:1:I.Fault'),
+                        'Wire_Break_Detected':   d.get('WIre_Break_Detected'),
+                        'Core_Break':            d.get('Core_Break'),
+                        'Door_Ok':               d.get('I_Door_Interlock_Ok'),
+                        'Estop_Ok':              d.get('I_Emergency_Stop_Ok'),
+                        'Guards_Ok':             d.get('Machine.Guards_Ok'),
+                        'All_Safties_Ok':        d.get('Machine.All_Safties_Ok'),
+                        'All_Axes_Ok':           d.get('Machine.All_Axes_Ok'),
+                        'All_Axes_Running':      d.get('Machine.All_Axes_Running'),
+                        'AxisSynced_1':          d.get('AxisSynced_OS1'),
+                        'AxisSynced_2':          d.get('AxisSynced_OS2'),
+                        'AxisSynced_3':          d.get('AxisSynced_OS3'),
+                        'AxisSynced_4':          d.get('AxisSynced_OS4'),
+                        'AxisSynced_5':          d.get('AxisSynced_OS5'),
+                        'Recipe_Name':           recipe_name,
+                        'Recipe_PPI':            recipe_ppi,
+                        'VFD_Freq_Actual':       d.get('Table_Drive:I.OutputFreq'),
+                        'VFD_Freq_Command':      d.get('Table_Drive:O.FreqCommand'),
+                        'VFD_Freq_Delta':        (
+                            (d.get('Table_Drive:O.FreqCommand') or 0) -
+                            (d.get('Table_Drive:I.OutputFreq')  or 0)
+                        ),
+                        'VFD_Faulted':           d.get('Table_Drive:I.Faulted'),
+                        'VFD_Active':            d.get('Table_Drive:I.Active'),
+                        'VFD_AtReference':       d.get('Table_Drive:I.AtReference'),
+                        'Transition_Active':     d.get('Transition_Active'),
+                        'Taper_Sensor':          d.get('Taper_Sensor_Input'),
+                        'Sensor_Mode':           d.get('Sensor_Mode_Enable'),
+                        'Length_To_Run':         d.get('Length_To_Run'),
+                        'Run_Complete':          d.get('Run_Complete'),
+                        'WireBreak_Move':        d.get('WireBreak_Move'),
+                        'EStop_Recover':         d.get('EStop_Recover'),
+                        'I_Table_Motor_OL':      d.get('I_Table_Motor_OL'),
+                        'I_CoreBreak_Sensor':    d.get('I_CoreBreak_Sensor'),
+                        'I_Triaxial_WB':         d.get('I_Triaxial_WB'),
+                        # Program-scoped
+                        'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
+                        'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
+                        'Fault_GuardDoor':       d.get('Program:MainProgram.Fault_GuardDoor'),
+                        'Fault_PullerServo':     d.get('Program:MainProgram.Fault_PullerServo'),
+                        'Fault_TableServo':      d.get('Program:MainProgram.Fault_TableServo'),
+                        'Recover_Step':          d.get('Program:MainProgram.Recover_Step'),
+                        'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
+                        'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
+                        'Servo_Axis_Faults':     d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
+                        # Servo sub-tags
+                        'Puller_ActualVel':      d.get('servoPuller_Axis.ActualVelocity'),
+                        'Puller_CmdVel':         d.get('servoPuller_Axis.CommandVelocity'),
+                        'Puller_VelCmdErr':      round(puller_vel_cmd_err, 6) if puller_vel_cmd_err is not None else None,
+                        'Puller_ActualPos':      d.get('servoPuller_Axis.ActualPosition'),
+                        'Puller_CmdPos':         d.get('servoPuller_Axis.CommandPosition'),
+                        'Puller_MotionStatus':   d.get('servoPuller_Axis.MotionStatus'),
+                        'Table_VelFeedback':     d.get('servoTable_Axis.VelocityFeedback'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
 
-                    if _wire_break_capturing:
-                        _wire_break_capture_rows.append(process_row.copy())
-                        if now >= _wire_break_capture_until:
-                            for r in _wire_break_capture_rows:
-                                write_csv_row(WIRE_BREAK_LOG, r)
-                            log.info(f'Wire break capture complete — {len(_wire_break_capture_rows)} rows saved')
-                            _wire_break_capturing = False
-                            _wire_break_capture_rows = []
+                    # ── Wire break post-capture ───────────────────────────────
+                    if _wb_capturing:
+                        _wb_capture_rows.append(process_row.copy())
+                        if now >= _wb_capture_until:
+                            log.info(f'Wire break capture complete — {len(_wb_capture_rows)} rows in buffer.')
+                            # The wire_break_log gets one summary row per break event (written at
+                            # break detection below).  The raw high-res window is available in the
+                            # rolling process_log for later ML training data extraction.
+                            _wb_capturing    = False
+                            _wb_capture_rows = []
 
+                    # ── State change → event_log ─────────────────────────────
                     if machine_state != prev_state and prev_state is not None:
-                        event_row = {
-                            'Timestamp':   timestamp,
-                            'Braider_ID':  BRAIDER_ID,
-                            'Event':       'STATE_CHANGE',
-                            'From_State':  state_name(prev_state),
-                            'To_State':    state_name(machine_state) if machine_state else '',
-                            'From_Code':   prev_state,
-                            'To_Code':     machine_state,
-                            'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
-                            'Recipe_Name': recipe_name,
-                            'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
-                            'Door_Ok':     d.get('I_Door_Interlock_Ok'),
-                            'Detail':      '',
-                        }
-                        write_csv_row(EVENT_LOG, event_row)
-                        log.info(f'State change: {state_name(prev_state)} -> {state_name(machine_state)}')
-                    
+                        _write_event(timestamp, 'STATE_CHANGE',
+                                     from_val=state_name(prev_state),
+                                     to_val=state_name(machine_state) if machine_state else '',
+                                     from_code=prev_state,
+                                     to_code=machine_state,
+                                     puller_feet=puller_feet,
+                                     recipe_name=recipe_name,
+                                     d=d)
+                        log.info(f'State: {state_name(prev_state)} → {state_name(machine_state)}')
+
                     if machine_state == 16 and prev_state != 16:
                         running_started_at = now
                     prev_state = machine_state
 
-                    STARTUP_GRACE_SECONDS = 5
+                    # ── RBE CHANGE_TAGS → event_log ──────────────────────────
+                    # One row written only when a tag transitions (0→1 or 1→0 for BOOLs;
+                    # any value change for DINT/REAL).
+                    for tag in CHANGE_TAGS:
+                        current_val = d.get(tag)
+                        if current_val is None:
+                            continue
+                        last_val = prev_change.get(tag)
+                        if last_val is None:
+                            # First poll after (re)connect — seed without logging
+                            prev_change[tag] = current_val
+                            continue
+                        if current_val != last_val:
+                            # Determine transition label for BOOLs
+                            if isinstance(current_val, bool) or current_val in (0, 1):
+                                transition = 'TRIGGERED' if current_val else 'CLEARED'
+                            else:
+                                transition = f'CHANGED ({last_val} → {current_val})'
+
+                            _write_event(timestamp, f'TAG_{tag}',
+                                         from_val=str(last_val),
+                                         to_val=str(current_val),
+                                         from_code=last_val,
+                                         to_code=current_val,
+                                         puller_feet=puller_feet,
+                                         recipe_name=recipe_name,
+                                         d=d,
+                                         detail=transition)
+                            log.info(f'RBE: {tag} {transition}')
+                            prev_change[tag] = current_val
+
+                    # ── Wire break detection → event_log + wire_break_log ────
                     in_startup = (
                         running_started_at is not None and
                         (now - running_started_at) < STARTUP_GRACE_SECONDS
@@ -741,158 +839,150 @@ def monitor_loop():
 
                     if wire_bits is not None and prev_wire_bits is not None:
                         if wire_bits != prev_wire_bits:
-                            changed    = wire_bits ^ prev_wire_bits
-                            new_breaks = wire_bits & changed
-                            cleared    = prev_wire_bits & changed
+                            changed      = wire_bits ^ prev_wire_bits
+                            new_breaks   = prev_wire_bits & changed    # bits 1→0
+                            cleared_bits = wire_bits & changed          # bits 0→1
 
                             if machine_state == 16 and not in_startup:
                                 if new_breaks:
-                                    log.warning(f'WIRE BREAK — bits:{bin(wire_bits)} at {puller_feet:.2f} ft')
-                                    event_row = {
-                                        'Timestamp':    timestamp,
-                                        'Braider_ID':   BRAIDER_ID,
-                                        'Event':        'WIRE_BREAK',
-                                        'From_State':   state_name(prev_state) if prev_state else '',
-                                        'To_State':     state_name(machine_state) if machine_state else '',
-                                        'From_Code':    prev_wire_bits,
-                                        'To_Code':      wire_bits,
-                                        'Puller_Feet':  round(puller_feet, 4) if puller_feet else None,
-                                        'Recipe_Name':  recipe_name,
-                                        'Estop_Ok':     d.get('I_Emergency_Stop_Ok'),
-                                        'Door_Ok':      d.get('I_Door_Interlock_Ok'),
-                                        'Detail':       f'bits_changed={bin(new_breaks)}',
-                                    }
-                                    write_csv_row(EVENT_LOG, event_row)
-                                    _wire_break_capture_rows = list(_rolling_buffer)
-                                    _wire_break_capturing = True
-                                    _wire_break_capture_until = now + POST_BREAK_CAPTURE_SECONDS
+                                    broken_carriers = parse_broken_carriers(changed, new_breaks)
+                                    for bc in broken_carriers:
+                                        _write_event(timestamp, 'WIRE_BREAK',
+                                                     from_val=str(prev_wire_bits),
+                                                     to_val=str(wire_bits),
+                                                     from_code=prev_wire_bits,
+                                                     to_code=wire_bits,
+                                                     puller_feet=puller_feet,
+                                                     recipe_name=recipe_name,
+                                                     d=d,
+                                                     detail=f"carrier={bc['carrier']} bit={bc['bit_index']}")
 
-                                if cleared:
-                                    event_row = {
-                                        'Timestamp':   timestamp,
-                                        'Braider_ID':  BRAIDER_ID,
-                                        'Event':       'WIRE_BREAK_CLEARED',
-                                        'From_State':  state_name(prev_state) if prev_state else '',
-                                        'To_State':    state_name(machine_state) if machine_state else '',
-                                        'From_Code':   prev_wire_bits,
-                                        'To_Code':     wire_bits,
-                                        'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
-                                        'Recipe_Name': recipe_name,
-                                        'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
-                                        'Door_Ok':     d.get('I_Door_Interlock_Ok'),
-                                        'Detail':      f'bits_cleared={bin(cleared)}',
-                                    }
-                                    write_csv_row(EVENT_LOG, event_row)
+                                        # Discrete wire_break_log row — one per broken carrier
+                                        wb_row = {
+                                            'Timestamp':        timestamp,
+                                            'Braider_ID':       BRAIDER_ID,
+                                            'Carrier':          bc['carrier'],
+                                            'Bit_Index':        bc['bit_index'],
+                                            'Bit_Mask_Before':  prev_wire_bits,
+                                            'Bit_Mask_After':   wire_bits,
+                                            'Bit_Changed_Mask': changed,
+                                            'Puller_Feet':      round(puller_feet, 4) if puller_feet else None,
+                                            'Machine_State':    machine_state,
+                                            'State_Name':       state_name(machine_state),
+                                            'Recipe_Name':      recipe_name,
+                                            'Recipe_PPI':       recipe_ppi,
+                                            'Active_Segment':   active_seg,
+                                            'Recover_Step':     d.get('Program:MainProgram.Recover_Step'),
+                                            'Recover_Position': d.get('Recover_Position'),
+                                        }
+                                        write_csv_row(WIRE_BREAK_LOG, wb_row)
+
+                                    log.warning(
+                                        f'WIRE BREAK — {len(broken_carriers)} carrier(s) at '
+                                        f'{puller_feet:.2f} ft | bits {bin(new_breaks)}'
+                                    )
+
+                                    # Start high-res post-break telemetry capture
+                                    _wb_capture_rows = list(_rolling_buffer)
+                                    _wb_capturing    = True
+                                    _wb_capture_until = now + POST_BREAK_CAPTURE_SECONDS
+
+                                if cleared_bits:
+                                    cleared_carriers = parse_broken_carriers(changed, cleared_bits)
+                                    for cc in cleared_carriers:
+                                        _write_event(timestamp, 'WIRE_BREAK_CLEARED',
+                                                     from_val=str(prev_wire_bits),
+                                                     to_val=str(wire_bits),
+                                                     from_code=prev_wire_bits,
+                                                     to_code=wire_bits,
+                                                     puller_feet=puller_feet,
+                                                     recipe_name=recipe_name,
+                                                     d=d,
+                                                     detail=f"carrier={cc['carrier']} bit={cc['bit_index']}")
+
                             elif machine_state == 16 and in_startup:
-                                log.debug(f'Wire bits changed during startup grace period — ignored')
+                                log.debug('Wire bits changed during startup grace — ignored.')
                             else:
-                                log.debug(f'Wire bits changed during structural setup')
+                                log.debug('Wire bits changed while not RUNNING — ignored.')
 
                     prev_wire_bits = wire_bits
 
-                    for ft in FAULT_TAGS:
-                        val = d.get(ft)
-                        if val:
-                            event_row = {
-                                'Timestamp':   timestamp,
-                                'Braider_ID':  BRAIDER_ID,
-                                'Event':       f'FAULT_{ft}',
-                                'From_State':  state_name(machine_state) if machine_state else '',
-                                'To_State':    '',
-                                'From_Code':   machine_state,
-                                'To_Code':     machine_state,
-                                'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
-                                'Recipe_Name': recipe_name,
-                                'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
-                                'Door_Ok':     d.get('I_Door_Interlock_Ok'),
-                                'Detail':      f'{ft}={val}',
-                            }
-                            write_csv_row(EVENT_LOG, event_row)
-                            log.warning(f'FAULT TAG: {ft} = {val}')
-
-                    # ── Update dashboard state dict ───────────────────────────
+                    # ── Update Flask shared state ────────────────────────────
                     with _lock:
                         _latest.update({
-                            'timestamp':          timestamp,
-                            'machine_state':      machine_state,
-                            'state_name':         state_name(machine_state) if machine_state else 'Unknown',
-                            'table_speed':        round(table_speed,  4) if table_speed  else None,
-                            'puller_speed':       round(puller_speed, 4) if puller_speed else None,
-                            'speed_ratio':        speed_ratio,
-                            'puller_pos_feet':    round(puller_feet,  2) if puller_feet  else None,
-                            'table_position':     round(table_pos,    2) if table_pos    else None,
-                            'active_segment':     active_seg,
-                            'no_faults':          no_faults,
-                            'wire_break_bits':    wire_bits,
-                            'recipe_name':        recipe_name,
-                            'recipe_ppi':         recipe_ppi,
-                            'door_ok':            d.get('I_Door_Interlock_Ok'),
-                            'estop_ok':           d.get('I_Emergency_Stop_Ok'),
-                            'guards_ok':          d.get('Machine.Guards_Ok'),
-                            'all_axes_running':   d.get('Machine.All_Axes_Running'),
-                            'axis1_synced':       d.get('AxisSynced_OS1'),
-                            'axis2_synced':       d.get('AxisSynced_OS2'),
-                            'axis3_synced':       d.get('AxisSynced_OS3'),
-                            'axis4_synced':       d.get('AxisSynced_OS4'),
-                            'axis5_synced':       d.get('AxisSynced_OS5'),
-                            'current_state_hrs':  ch,
-                            'current_state_mins': cm,
-                            'current_state_secs': round(cs / 1000, 0) if cs else None,
-                            'state_elapsed_s':    state_elapsed_s,
-                            'discrete_distance':  d.get('Discrete_Distance'),
-                            'discrete_loops':     d.get('Discrete_Loops'),
-                            'cum_running_hrs':    cum_running if cum_running is not None else _latest.get('cum_running_hrs'),
-                            'cum_stopped_hrs':    cum_stopped if cum_stopped is not None else _latest.get('cum_stopped_hrs'),
-                            'cum_ready_hrs':      cum_ready if cum_ready is not None else _latest.get('cum_ready_hrs'),
-                            'recipe_modified':    recipe_modified,
-                            'mandrel_mode':       mandrel_mode,
-                            'vfd_freq_actual':    d.get('Table_Drive:I.OutputFreq'),
-                            'vfd_freq_command':   d.get('Table_Drive:O.FreqCommand'),
-                            'vfd_freq_delta':     (d.get('Table_Drive:O.FreqCommand', 0) or 0) - (d.get('Table_Drive:I.OutputFreq', 0) or 0),
-                            'vfd_faulted':        d.get('Table_Drive:I.Faulted'),
-                            'vfd_at_ref':         d.get('Table_Drive:I.AtReference'),
-                            'horn_gear_rpm':      d.get('Horn_Gear_RPM'),
-                            'active_seg_speed':   d.get('Active_Seg_Speed'),
-                            'transition_active':  d.get('Transition_Active'),
-                            'machine_faults':     d.get('Machine_Faults'),
-                            'wire_break_detected':d.get('WIre_Break_Detected'),
-                            'core_break':         d.get('Core_Break'),
-                            'i_table_motor_ol':   d.get('I_Table_Motor_OL'),
+                            'timestamp':           timestamp,
+                            'machine_state':       machine_state,
+                            'state_name':          state_name(machine_state) if machine_state else 'Unknown',
+                            'table_speed':         round(table_speed, 4)  if table_speed  else None,
+                            'puller_speed':        round(puller_speed, 4) if puller_speed else None,
+                            'speed_ratio':         speed_ratio,
+                            'puller_pos_feet':     round(puller_feet, 2)  if puller_feet  else None,
+                            'table_position':      round(table_pos, 2)    if table_pos    else None,
+                            'active_segment':      active_seg,
+                            'no_faults':           no_faults,
+                            'wire_break_bits':     wire_bits,
+                            'recipe_name':         recipe_name,
+                            'recipe_ppi':          recipe_ppi,
+                            'door_ok':             d.get('I_Door_Interlock_Ok'),
+                            'estop_ok':            d.get('I_Emergency_Stop_Ok'),
+                            'guards_ok':           d.get('Machine.Guards_Ok'),
+                            'all_safties_ok':      d.get('Machine.All_Safties_Ok'),
+                            'all_axes_ok':         d.get('Machine.All_Axes_Ok'),
+                            'all_axes_running':    d.get('Machine.All_Axes_Running'),
+                            'axis1_synced':        d.get('AxisSynced_OS1'),
+                            'axis2_synced':        d.get('AxisSynced_OS2'),
+                            'axis3_synced':        d.get('AxisSynced_OS3'),
+                            'axis4_synced':        d.get('AxisSynced_OS4'),
+                            'axis5_synced':        d.get('AxisSynced_OS5'),
+                            'current_state_hrs':   ch,
+                            'current_state_mins':  cm,
+                            'current_state_secs':  round(cs / 1000, 0) if cs else None,
+                            'state_elapsed_s':     state_elapsed_s,
+                            'cum_running_hrs':     cum_running if cum_running is not None else _latest.get('cum_running_hrs'),
+                            'cum_stopped_hrs':     cum_stopped if cum_stopped is not None else _latest.get('cum_stopped_hrs'),
+                            'cum_ready_hrs':       cum_ready   if cum_ready   is not None else _latest.get('cum_ready_hrs'),
+                            'recipe_modified':     recipe_modified,
+                            'mandrel_mode':        mandrel_mode,
+                            'taper_sensor':        d.get('Taper_Sensor_Input'),
+                            'sensor_mode':         d.get('Sensor_Mode_Enable'),
+                            'vfd_freq_actual':     d.get('Table_Drive:I.OutputFreq'),
+                            'vfd_freq_command':    d.get('Table_Drive:O.FreqCommand'),
+                            'vfd_freq_delta':      (
+                                (d.get('Table_Drive:O.FreqCommand') or 0) -
+                                (d.get('Table_Drive:I.OutputFreq')  or 0)
+                            ),
+                            'vfd_faulted':         d.get('Table_Drive:I.Faulted'),
+                            'vfd_at_ref':          d.get('Table_Drive:I.AtReference'),
+                            'vfd_active':          d.get('Table_Drive:I.Active'),
+                            'machine_faults':      d.get('Machine_Faults'),
+                            'no_msgs':             d.get('No_Machine_Msgs'),
+                            'wire_break_detected': d.get('WIre_Break_Detected'),
+                            'core_break':          d.get('Core_Break'),
+                            'i_table_motor_ol':    d.get('I_Table_Motor_OL'),
                             'i_triaxial_wb':       d.get('I_Triaxial_WB'),
-                            'loop_count':         d.get('Loop_Count'),
-                            'length_to_run':      d.get('Length_To_Run'),
-                            'run_complete':       d.get('Run_Complete'),
-                            'taper_sensor':       d.get('Taper_Sensor_Input'),
-                            'tube_dia_mm':        d.get('Tube_Dia_mm'),
-                            'ppi_pos':            d.get('PPI_Pos'),
-                            'new_part':           d.get('New_Part_Latch'),
-                            'inactivity_secs':    d.get('Inactivity_Timer.ACC'),
-                            'estop_recover':      d.get('EStop_Recover'),
-                            'abs_value_peak':      d.get('Program:P01_TableDrive.Abs_Value_Peak'),
-                            'ave_current_data':    d.get('Program:P01_TableDrive.Ave_Current_Data'),
+                            'length_to_run':       d.get('Length_To_Run'),
+                            'run_complete':        d.get('Run_Complete'),
+                            'transition_active':   d.get('Transition_Active'),
+                            'estop_recover':       d.get('EStop_Recover'),
                             'fault_wire_break':    d.get('Program:MainProgram.Fault_WireBreak'),
                             'fault_estop':         d.get('Program:MainProgram.Fault_EStop'),
+                            'fault_puller_servo':  d.get('Program:MainProgram.Fault_PullerServo'),
+                            'fault_table_servo':   d.get('Program:MainProgram.Fault_TableServo'),
                             'recover_step':        d.get('Program:MainProgram.Recover_Step'),
                             'puller_current_dist': d.get('Program:MainProgram.Puller_Current_Dist'),
                             'table_current_dist':  d.get('Program:MainProgram.Table_Current_Dist'),
-                            'sequence_step':       d.get('Sequence_Step'),
-                            'recover_position':    d.get('Recover_Position'),
-                            'lamp_running':        d.get('O_Lamp_Green_Machine_Running'),
-                            'lamp_stopped':        d.get('O_Lamp_Red_Machine_Stopped'),
-                            'ok_to_jog':           d.get('Ok_To_Jog'),
-                            'jog_fwd':             d.get('I_Pushbutton_Jog_Table_Fwd'),
-                            'jog_rev':             d.get('I_Pushbutton_Jog_Table_Rev'),
-                            'start_pb':            d.get('I_Pushbutton_Start'),
-                            'master_no_motion':    d.get('Master_No_Motion'),
-                            'puller_vel_cmd_err':  (
-                                (d.get('servoPuller_Axis.CommandVelocity') or 0) -
-                                (d.get('servoPuller_Axis.ActualVelocity') or 0)
-                            ) if d.get('servoPuller_Axis.CommandVelocity') is not None else None,
-                            'connected':          True,
-                            'daily_state_pcts':   calculate_daily_state_percentages(),
+                            'servo_axis_faults':   d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
+                            'puller_actual_vel':   d.get('servoPuller_Axis.ActualVelocity'),
+                            'puller_cmd_vel':      d.get('servoPuller_Axis.CommandVelocity'),
+                            'puller_vel_cmd_err':  round(puller_vel_cmd_err, 5) if puller_vel_cmd_err is not None else None,
+                            'puller_actual_pos':   d.get('servoPuller_Axis.ActualPosition'),
+                            'puller_cmd_pos':      d.get('servoPuller_Axis.CommandPosition'),
+                            'puller_motion_status':d.get('servoPuller_Axis.MotionStatus'),
+                            'table_vel_feedback':  d.get('servoTable_Axis.VelocityFeedback'),
+                            'connected':           True,
+                            'daily_state_pcts':    calculate_daily_state_percentages(),
                         })
 
-                    archive_logs()
                     time.sleep(FAST_POLL_INTERVAL)
 
         except KeyboardInterrupt:
@@ -900,32 +990,53 @@ def monitor_loop():
             break
         except Exception as e:
             with _lock:
-                _latest['connected'] = False
+                _latest['connected']  = False
                 _latest['last_error'] = str(e)
 
-            # Still run archive check even when disconnected
-            archive_logs()
-
-            if not hasattr(monitor_loop, '_retry_count'):
-                monitor_loop._retry_count = 0
             monitor_loop._retry_count += 1
-
             if monitor_loop._retry_count <= 3:
                 wait = 10
                 log.error(f'Connection lost: {e}')
             elif monitor_loop._retry_count <= 10:
                 wait = 60
                 if monitor_loop._retry_count == 4:
-                    log.warning('PLC unreachable — switching to 60s retry interval')
+                    log.warning('PLC unreachable — switching to 60s retry interval.')
             else:
                 wait = 300
                 if monitor_loop._retry_count % 12 == 0:
-                    log.warning(f'PLC still unreachable — retrying every 5min')
+                    log.warning('PLC still unreachable — retrying every 5 min.')
 
             time.sleep(wait)
 
 
-# ── Flask dashboard template string ───────────────────────────────────────────
+# ── Event log helper ──────────────────────────────────────────────────────────
+
+def _write_event(timestamp, event_type, *, from_val, to_val, from_code,
+                 to_code, puller_feet, recipe_name, d, detail=''):
+    """Write one row to event_log.csv."""
+    row = {
+        'Timestamp':   timestamp,
+        'Braider_ID':  BRAIDER_ID,
+        'Event_Type':  event_type,
+        'From_Value':  from_val,
+        'To_Value':    to_val,
+        'From_Code':   from_code,
+        'To_Code':     to_code,
+        'Puller_Feet': round(puller_feet, 4) if puller_feet else None,
+        'Recipe_Name': recipe_name,
+        'Machine_State': d.get('Machine_State'),
+        'State_Name':  state_name(d.get('Machine_State')) if d.get('Machine_State') else '',
+        'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
+        'Door_Ok':     d.get('I_Door_Interlock_Ok'),
+        'No_Faults':   d.get('No_Machine_Faults'),
+        'Machine_Faults': d.get('Machine_Faults'),
+        'Detail':      detail,
+    }
+    write_csv_row(EVENT_LOG, row)
+
+
+# ── Flask dashboard ───────────────────────────────────────────────────────────
+# (HTML/JS unchanged from original — only the Python data routes matter here)
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -942,12 +1053,8 @@ DASHBOARD_HTML = """
         .value{ font-size:26px; font-weight:bold; margin-top:4px; line-height:1.1; }
         .unit { font-size:12px; color:#888; margin-top:2px; }
         .section { font-size:11px; color:#555; text-transform:uppercase; letter-spacing:2px; margin:20px 0 8px; }
-        .running { color:#66bb6a; }
-        .stopped { color:#ef5350; }
-        .paused  { color:#ffa726; }
-        .fault   { color:#ef5350; }
-        .ok      { color:#66bb6a; }
-        .warn    { color:#ffa726; }
+        .running { color:#66bb6a; } .stopped { color:#ef5350; } .paused  { color:#ffa726; }
+        .fault   { color:#ef5350; } .ok      { color:#66bb6a; } .warn    { color:#ffa726; }
         .blink   { animation:blink 1s step-start infinite; }
         @keyframes blink { 50%{opacity:0} }
         .conn { font-size:12px; margin-top:20px; color:#888; }
@@ -978,7 +1085,8 @@ DASHBOARD_HTML = """
                 <span id="state-value">{{ d.state_name or '—' }}</span>
             </div>
             <div class="unit">
-                code {{ d.machine_state or 0 }} &nbsp;|&nbsp; <span id="elapsed-value">{% if d.state_elapsed_s %}{{ (d.state_elapsed_s // 3600)|int }}h {{ ((d.state_elapsed_s % 3600) // 60)|int }}m{% endif %}</span>
+                code {{ d.machine_state or 0 }} &nbsp;|&nbsp;
+                <span id="elapsed-value">{% if d.state_elapsed_s %}{{ (d.state_elapsed_s // 3600)|int }}h {{ ((d.state_elapsed_s % 3600) // 60)|int }}m{% endif %}</span>
             </div>
         </div>
 
@@ -986,8 +1094,7 @@ DASHBOARD_HTML = """
             <div class="label">Recipe</div>
             <div class="value" style="font-size:22px">{{ d.recipe_name or '—' }}</div>
             <div class="unit">
-                Body: {{ d.recipe_ppi }} PPI
-                {% if d.connector_ppi %}&nbsp;| Conn: {{ d.connector_ppi }} PPI{% endif %}
+                PPI: {{ d.recipe_ppi }}
                 {% if d.recipe_modified %}&nbsp;<span class="warn">modified</span>{% endif %}
                 {% if d.mandrel_mode %}&nbsp;| mandrel{% endif %}
                 {% if d.sensor_mode %}&nbsp;| <span class="ok">sensor</span>{% endif %}
@@ -1003,7 +1110,7 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
-        <div class="card" style="min-width: 280px;">
+        <div class="card" style="min-width:280px;">
             <div class="label">Daily Utilization</div>
             <div style="display:flex; align-items:center; gap:14px; margin-top:6px;">
                 <canvas id="oeePieCanvas" width="110" height="110" style="flex-shrink:0;"></canvas>
@@ -1022,7 +1129,7 @@ DASHBOARD_HTML = """
         <div class="card">
             <div class="label">Table Speed</div>
             <div class="value" id="table-value">{{ d.table_speed or '—' }}</div>
-            <div class="unit">rev/s &nbsp;|&nbsp; <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm</div>
+            <div class="unit">rev/s (filtered) &nbsp;|&nbsp; <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm</div>
         </div>
 
         <div class="card">
@@ -1048,11 +1155,19 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Puller Vel Error</div>
+            <div class="label">Puller Vel Error (cmd−actual)</div>
             <div class="value" style="font-size:22px">
                 <span id="puller-vel-err">{% if d.puller_vel_cmd_err is not none %}{{ '%.5f'|format(d.puller_vel_cmd_err) }}{% else %}—{% endif %}</span>
             </div>
-            <div class="unit">cmd − actual in/s · tension proxy</div>
+            <div class="unit">rev/s · tension proxy</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Table Vel Feedback (raw encoder)</div>
+            <div class="value" style="font-size:22px">
+                <span id="table-vel-fb">{% if d.table_vel_feedback is not none %}{{ '%.4f'|format(d.table_vel_feedback) }}{% else %}—{% endif %}</span>
+            </div>
+            <div class="unit">rev/s · wire break pre-detection</div>
         </div>
 
         <div class="card">
@@ -1077,7 +1192,7 @@ DASHBOARD_HTML = """
             <div id="wb-div" class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
                 <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
             </div>
-            <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = 3</div>
+            <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = {{ normal_wire_bits }}</div>
         </div>
 
         <div class="card">
@@ -1127,128 +1242,6 @@ DASHBOARD_HTML = """
             <div class="unit" style="margin-top:8px">all green = normal</div>
         </div>
 
-    </div>
-
-    <!-- ── DETAIL SECTIONS (toggle) ────────────────────────── -->
-    <div id="detail-panel" style="display:none;">
-
-    <!-- ── SERVO & MOTION ──────────────────────────────────── -->
-    <div class="section">Servo & Motion</div>
-    <div class="grid">
-
-        <div class="card">
-            <div class="label">Puller Vel Error</div>
-            <div class="value" style="font-size:22px">
-                <span id="puller-vel-err2">{% if d.puller_vel_cmd_err is not none %}{{ '%.5f'|format(d.puller_vel_cmd_err) }}{% else %}—{% endif %}</span>
-            </div>
-            <div class="unit">cmd − actual in/s</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Sequence Step</div>
-            <div class="value" style="font-size:26px">
-                <span id="seq-step">{{ d.sequence_step or '—' }}</span>
-            </div>
-            <div class="unit">internal state machine step</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Servo Health</div>
-            <div class="checks">
-                <span id="servo-puller-ok" class="{{ 'ok' if d.puller_servo_ok else 'fault blink' }}">
-                    {{ '✓' if d.puller_servo_ok else '✗' }} Puller OK
-                </span><br>
-                <span id="servo-table-ok" class="{{ 'ok' if d.table_servo_ok else 'fault blink' }}">
-                    {{ '✓' if d.table_servo_ok else '✗' }} Table OK
-                </span><br>
-                <span id="servo-group-fault" class="{{ 'fault blink' if d.group_fault else 'ok' }}">
-                    {{ '✗ Group Fault' if d.group_fault else '✓ Group OK' }}
-                </span>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Recover Position</div>
-            <div class="value" style="font-size:22px">
-                <span id="recover-pos">{{ '%.3f'|format(d.recover_position) if d.recover_position else '—' }}</span>
-            </div>
-            <div class="unit">ft — wire break backup position</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Segment Positions</div>
-            <div class="value" style="font-size:16px">
-                <span id="seg-end">End: {{ '%.3f'|format(d.tablepos_endofseg) if d.tablepos_endofseg else '—' }}</span>
-            </div>
-            <div class="unit">
-                Last: <span id="seg-last">{{ '%.3f'|format(d.tablepos_endoflastseg) if d.tablepos_endoflastseg else '—' }}</span> rev
-            </div>
-        </div>
-
-    </div>
-
-    <!-- ── OPERATOR ──────────────────────────────────────────── -->
-    <div class="section">Operator Inputs</div>
-    <div class="grid">
-
-        <div class="card">
-            <div class="label">Panel Lamps</div>
-            <div class="checks">
-                <span id="lamp-run" class="{{ 'ok' if d.lamp_running else 'stopped' }}">
-                    {{ '● Running' if d.lamp_running else '○ Running' }}
-                </span><br>
-                <span id="lamp-stop" class="{{ 'fault' if d.lamp_stopped else 'ok' }}">
-                    {{ '● Stopped' if d.lamp_stopped else '○ Stopped' }}
-                </span>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Buttons</div>
-            <div class="checks">
-                <span id="btn-start" class="{{ 'ok' if d.start_pb else 'muted' }}">
-                    {{ '▶ START pressed' if d.start_pb else '○ Start' }}
-                </span><br>
-                <span id="btn-jog-fwd" class="{{ 'warn' if d.jog_fwd else 'muted' }}">
-                    {{ '▶ JOG FWD' if d.jog_fwd else '○ Jog Fwd' }}
-                </span><br>
-                <span id="btn-jog-rev" class="{{ 'warn' if d.jog_rev else 'muted' }}">
-                    {{ '◀ JOG REV' if d.jog_rev else '○ Jog Rev' }}
-                </span><br>
-                <span id="btn-ok-jog" class="{{ 'ok' if d.ok_to_jog else 'stopped' }}">
-                    {{ '✓ Jog Permitted' if d.ok_to_jog else '✗ Jog Locked' }}
-                </span>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="label">Master No Motion</div>
-            <div class="value" style="font-size:22px">
-                <span id="no-motion" class="{{ 'warn' if d.master_no_motion else 'ok' }}">
-                    {{ 'YES' if d.master_no_motion else 'NO' }}
-                </span>
-            </div>
-            <div class="unit">axes at rest</div>
-        </div>
-
-        <div class="card">
-            <div class="label">HMI Messages</div>
-            <div class="value" style="font-size:22px">
-                <span id="msg-scroll">{{ d.machine_msg_scroll or '—' }}</span>
-            </div>
-            <div class="unit">active message code</div>
-        </div>
-
-    </div>
-
-        <div class="card">
-            <div class="label">Segment Progress</div>
-            <div class="value" style="font-size:18px">
-                P: <span id="puller-seg-dist">{{ '%.2f'|format(d.puller_current_dist) if d.puller_current_dist else '—' }}</span> ft
-            </div>
-            <div class="unit">T: <span id="table-seg-dist">{{ '%.2f'|format(d.table_current_dist) if d.table_current_dist else '—' }}</span> rev · current segment</div>
-        </div>
-
         <div class="card">
             <div class="label">Individual Faults</div>
             <div class="checks" style="font-size:11px;">
@@ -1267,9 +1260,7 @@ DASHBOARD_HTML = """
             <div class="unit">wire break recovery progress</div>
         </div>
 
-    </div><!-- end operator grid -->
-
-    </div><!-- end detail-panel -->
+    </div>
 
     <div class="section">Live — Last 2.5 Minutes</div>
     <div style="background:#2a2a2a; border-radius:8px; padding:14px; margin-bottom:12px;">
@@ -1279,445 +1270,200 @@ DASHBOARD_HTML = """
     <div class="conn" id="conn-bar">
         PLC: <span id="conn-status" class="ok">CONNECTED</span>
         &nbsp;|&nbsp; Logs: {{ log_dir }}
-        &nbsp;|&nbsp; Braider_2
-        &nbsp;|&nbsp; <span id="sound-toggle" onclick="toggleSound()" style="cursor:pointer">🔔 Sound ON</span>
-        &nbsp;|&nbsp; <span id="detail-toggle" onclick="toggleDetail()" style="cursor:pointer">🔍 Details OFF</span>
+        &nbsp;|&nbsp; {{ braider_id }}
         &nbsp;|&nbsp; <span id="last-update" style="color:#555"></span>
     </div>
 
 <script>
-let soundEnabled = localStorage.getItem('soundEnabled') === 'true';
-
-// Detail panel toggle
-let detailVisible = localStorage.getItem('detailVisible') === 'true';
-function toggleDetail() {
-    detailVisible = !detailVisible;
-    localStorage.setItem('detailVisible', detailVisible);
-    document.getElementById('detail-panel').style.display = detailVisible ? 'block' : 'none';
-    document.getElementById('detail-toggle').textContent = detailVisible ? '🔍 Details ON' : '🔍 Details OFF';
-}
-// Apply saved state on load
-document.addEventListener('DOMContentLoaded', function() {
-    if (detailVisible) {
-        document.getElementById('detail-panel').style.display = 'block';
-        document.getElementById('detail-toggle').textContent = '🔍 Details ON';
-    }
-});
-function toggleSound() {
-    soundEnabled = !soundEnabled;
-    localStorage.setItem('soundEnabled', soundEnabled);
-    document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
-}
-document.getElementById('sound-toggle').textContent = soundEnabled ? '🔔 Sound ON' : '🔕 Sound OFF';
-
-let audioContext = null;
-let audioUnlocked = false;
-const silentAudio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
-
-function unlockAudio() {
-    if (audioUnlocked) return;
-    silentAudio.play().catch(() => {});
-    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioContext.state === 'suspended') audioContext.resume();
-    audioUnlocked = true;
-}
-document.addEventListener('click', unlockAudio, { once: false });
-
-function beep(freq, duration, volume) {
-    try {
-        unlockAudio();
-        const ctx = audioContext || new (window.AudioContext || window.webkitAudioContext)();
-        audioContext = ctx;
-        if (ctx.state === 'suspended') ctx.resume();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
-        gain.gain.value = volume || 0.3;
-        osc.frequency.value = freq; osc.type = 'sine';
-        osc.start(); osc.stop(ctx.currentTime + duration / 1000);
-    } catch(e) {}
-}
-function alertWireBreak() {
-    beep(880, 200, 0.4); setTimeout(() => beep(880, 200, 0.4), 300); setTimeout(() => beep(880, 200, 0.4), 600);
-}
-function alertStateChange() { beep(440, 300, 0.2); }
-
-// ── Live chart plain canvas ───────────────────────────────────────────────
-const MAX_POINTS = 75;  
-const tableSpeed    = Array(MAX_POINTS).fill(null);
-const pullerSpeed   = Array(MAX_POINTS).fill(null);
-const speedRatio    = Array(MAX_POINTS).fill(null);
-const timestamps    = Array(MAX_POINTS).fill('');
+const MAX_POINTS = 75;
+const tableSpeed  = Array(MAX_POINTS).fill(null);
+const pullerSpeed = Array(MAX_POINTS).fill(null);
+const speedRatio  = Array(MAX_POINTS).fill(null);
+const timestamps  = Array(MAX_POINTS).fill('');
 const machineStates = Array(MAX_POINTS).fill(0);
-
 const canvas = document.getElementById('liveChart');
 const canvasCtx = canvas.getContext('2d');
 
 function drawChart() {
     const W = canvas.width  = canvas.parentElement.clientWidth - 28;
     const H = canvas.height = 300;
-    const PAD   = { top: 8, right: 10, bottom: 22, left: 52 };
-    const GAP   = 8;
-    const PANELS = 3;
+    const PAD = {top:8, right:10, bottom:22, left:52};
+    const GAP = 8; const PANELS = 3;
     const plotW  = W - PAD.left - PAD.right;
-    const panelH = (H - PAD.top - PAD.bottom - GAP * (PANELS-1)) / PANELS;
-
-    canvasCtx.clearRect(0, 0, W, H);
-    const panelTop = p => PAD.top + p * (panelH + GAP);
-
+    const panelH = (H - PAD.top - PAD.bottom - GAP*(PANELS-1)) / PANELS;
+    canvasCtx.clearRect(0,0,W,H);
+    const panelTop = p => PAD.top + p*(panelH+GAP);
     function drawBackground(p) {
-        for (let i = 0; i < MAX_POINTS - 1; i++) {
-            const x0 = PAD.left + (i / (MAX_POINTS-1)) * plotW;
-            const x1 = PAD.left + ((i+1) / (MAX_POINTS-1)) * plotW;
-            canvasCtx.fillStyle = machineStates[i] === 16 ? 'rgba(102,187,106,0.12)' : 'rgba(144,164,174,0.08)';
-            canvasCtx.fillRect(x0, panelTop(p), x1-x0, panelH);
+        for (let i=0; i<MAX_POINTS-1; i++) {
+            const x0=PAD.left+(i/(MAX_POINTS-1))*plotW, x1=PAD.left+((i+1)/(MAX_POINTS-1))*plotW;
+            canvasCtx.fillStyle=machineStates[i]===16?'rgba(102,187,106,0.12)':'rgba(144,164,174,0.08)';
+            canvasCtx.fillRect(x0,panelTop(p),x1-x0,panelH);
         }
-        canvasCtx.strokeStyle = '#333'; canvasCtx.lineWidth = 0.5;
-        for (let i = 0; i <= 3; i++) {
-            const y = panelTop(p) + (i/3) * panelH;
-            canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left, y); canvasCtx.lineTo(PAD.left + plotW, y); canvasCtx.stroke();
+        canvasCtx.strokeStyle='#333'; canvasCtx.lineWidth=0.5;
+        for (let i=0; i<=3; i++) {
+            const y=panelTop(p)+(i/3)*panelH;
+            canvasCtx.beginPath(); canvasCtx.moveTo(PAD.left,y); canvasCtx.lineTo(PAD.left+plotW,y); canvasCtx.stroke();
         }
     }
-
     function range(arr) {
-        const vals = arr.filter(v => v !== null && isFinite(v));
-        if (!vals.length) return [0, 1];
-        const mn = Math.min(...vals), mx = Math.max(...vals);
-        const pad = (mx - mn) * 0.15 || 0.05;
-        return [mn - pad, mx + pad];
+        const vals=arr.filter(v=>v!==null&&isFinite(v));
+        if (!vals.length) return [0,1];
+        const mn=Math.min(...vals),mx=Math.max(...vals);
+        const pad=(mx-mn)*0.15||0.05; return [mn-pad,mx+pad];
     }
-
-    function drawLine(p, data, color, mn, mx) {
-        canvasCtx.strokeStyle = color; canvasCtx.lineWidth = 1.5; canvasCtx.lineJoin = 'round';
-        canvasCtx.beginPath();
-        let started = false;
-        const top = panelTop(p);
-        for (let i = 0; i < MAX_POINTS; i++) {
-            if (data[i] === null || !isFinite(data[i])) { started = false; continue; }
-            const x = PAD.left + (i / (MAX_POINTS-1)) * plotW;
-            const y = top + panelH - ((data[i] - mn) / (mx - mn)) * panelH;
-            if (!started) { canvasCtx.moveTo(x, y); started = true; }
-            else canvasCtx.lineTo(x, y);
+    function drawLine(p,data,color,mn,mx) {
+        canvasCtx.strokeStyle=color; canvasCtx.lineWidth=1.5; canvasCtx.lineJoin='round';
+        canvasCtx.beginPath(); let started=false;
+        const top=panelTop(p);
+        for (let i=0;i<MAX_POINTS;i++) {
+            if (data[i]===null||!isFinite(data[i])) { started=false; continue; }
+            const x=PAD.left+(i/(MAX_POINTS-1))*plotW;
+            const y=top+panelH-((data[i]-mn)/(mx-mn))*panelH;
+            if (!started) { canvasCtx.moveTo(x,y); started=true; } else canvasCtx.lineTo(x,y);
         }
         canvasCtx.stroke();
     }
-
-    function labelY(p, mn, mx, color) {
-        canvasCtx.fillStyle = color; canvasCtx.font = '9px monospace'; canvasCtx.textAlign = 'right';
-        canvasCtx.fillText(mx.toFixed(3), PAD.left - 3, panelTop(p) + 9);
-        canvasCtx.fillText(mn.toFixed(3), PAD.left - 3, panelTop(p) + panelH - 2);
+    function labelY(p,mn,mx,color) {
+        canvasCtx.fillStyle=color; canvasCtx.font='9px monospace'; canvasCtx.textAlign='right';
+        canvasCtx.fillText(mx.toFixed(3),PAD.left-3,panelTop(p)+9);
+        canvasCtx.fillText(mn.toFixed(3),PAD.left-3,panelTop(p)+panelH-2);
     }
-
-    function labelPanel(p, text, color) {
-        canvasCtx.fillStyle = color; canvasCtx.font = 'bold 10px monospace'; canvasCtx.textAlign = 'left';
-        canvasCtx.fillText(text, PAD.left + 4, panelTop(p) + 11);
+    function labelPanel(p,text,color) {
+        canvasCtx.fillStyle=color; canvasCtx.font='bold 10px monospace'; canvasCtx.textAlign='left';
+        canvasCtx.fillText(text,PAD.left+4,panelTop(p)+11);
     }
-
-    const [tMn, tMx] = range(tableSpeed);
-    drawBackground(0); drawLine(0, tableSpeed, '#4fc3f7', tMn, tMx); labelY(0, tMn, tMx, '#4fc3f7'); labelPanel(0, 'Table Speed (rev/s)', '#4fc3f7');
-
-    const [pMn, pMx] = range(pullerSpeed);
-    drawBackground(1); drawLine(1, pullerSpeed, '#81c784', pMn, pMx); labelY(1, pMn, pMx, '#81c784'); labelPanel(1, 'Puller Speed (in/s)', '#81c784');
-
-    const [rMn, rMx] = range(speedRatio);
-    drawBackground(2); drawLine(2, speedRatio, '#ffb74d', rMn, rMx); labelY(2, rMn, rMx, '#ffb74d'); labelPanel(2, 'Speed Ratio', '#ffb74d');
-
-    canvasCtx.fillStyle = '#555'; canvasCtx.font = '9px monospace'; canvasCtx.textAlign = 'center';
-    const xBottom = panelTop(2) + panelH + 14;
-    if (timestamps[0])            canvasCtx.fillText(timestamps[0],            PAD.left,         xBottom);
-    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1], PAD.left + plotW, xBottom);
-    const mid = Math.floor(MAX_POINTS/2);
-    if (timestamps[mid]) canvasCtx.fillText(timestamps[mid], PAD.left + plotW/2, xBottom);
+    const [tMn,tMx]=range(tableSpeed);
+    drawBackground(0); drawLine(0,tableSpeed,'#4fc3f7',tMn,tMx); labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rev/s)','#4fc3f7');
+    const [pMn,pMx]=range(pullerSpeed);
+    drawBackground(1); drawLine(1,pullerSpeed,'#81c784',pMn,pMx); labelY(1,pMn,pMx,'#81c784'); labelPanel(1,'Puller Speed (in/s)','#81c784');
+    const [rMn,rMx]=range(speedRatio);
+    drawBackground(2); drawLine(2,speedRatio,'#ffb74d',rMn,rMx); labelY(2,rMn,rMx,'#ffb74d'); labelPanel(2,'Speed Ratio','#ffb74d');
+    canvasCtx.fillStyle='#555'; canvasCtx.font='9px monospace'; canvasCtx.textAlign='center';
+    const xBottom=panelTop(2)+panelH+14;
+    if (timestamps[0]) canvasCtx.fillText(timestamps[0],PAD.left,xBottom);
+    if (timestamps[MAX_POINTS-1]) canvasCtx.fillText(timestamps[MAX_POINTS-1],PAD.left+plotW,xBottom);
+    const mid=Math.floor(MAX_POINTS/2);
+    if (timestamps[mid]) canvasCtx.fillText(timestamps[mid],PAD.left+plotW/2,xBottom);
 }
 
-// ── Fetch loop tracking variables ─────────────────────────────────────────────
-let lastState  = null;
-let lastWBBits = null;
-let lastSeenTimestamp = "";
-let timestampAgeTicks = 0;
+let lastState=null, lastWBBits=null, lastSeenTimestamp='', timestampAgeTicks=0;
 
 async function fetchAndUpdate() {
     try {
-        const res  = await fetch('/api/latest');
-        const data = await res.json();
-        const now  = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const ts   = data.table_speed  || 0;
-        const ps   = data.puller_speed || 0;
-        const sr   = data.speed_ratio  || null;
-        const wb   = data.wire_break_bits;
-        const st   = data.machine_state;
-
-        // ── BULLETPROOF STALE CHECK (Clock-Sync Independent) ──
-        let isStale = false;
+        const res=await fetch('/api/latest'); const data=await res.json();
+        const now=new Date().toLocaleTimeString('en-US',{hour12:false});
+        const ts=data.table_speed||0, ps=data.puller_speed||0, sr=data.speed_ratio||null;
+        const wb=data.wire_break_bits, st=data.machine_state;
+        let isStale=false;
         if (data.timestamp) {
-            if (data.timestamp === lastSeenTimestamp) {
-                timestampAgeTicks++;
-            } else {
-                lastSeenTimestamp = data.timestamp;
-                timestampAgeTicks = 0;
-            }
-            if (timestampAgeTicks >= 5 || !data.connected) {
-                isStale = true;
-            }
-        } else {
-            isStale = true;
-        }
-
-        tableSpeed.shift();    tableSpeed.push(isStale ? null : ts);
-        pullerSpeed.shift();   pullerSpeed.push(isStale ? null : ps);
-        speedRatio.shift();    speedRatio.push(isStale ? null : sr);
-        timestamps.shift();    timestamps.push(now);
-        machineStates.shift(); machineStates.push(isStale ? 0 : (st || 0));
-
+            if (data.timestamp===lastSeenTimestamp) timestampAgeTicks++;
+            else { lastSeenTimestamp=data.timestamp; timestampAgeTicks=0; }
+            if (timestampAgeTicks>=5||!data.connected) isStale=true;
+        } else { isStale=true; }
+        tableSpeed.shift();  tableSpeed.push(isStale?null:ts);
+        pullerSpeed.shift(); pullerSpeed.push(isStale?null:ps);
+        speedRatio.shift();  speedRatio.push(isStale?null:sr);
+        timestamps.shift();  timestamps.push(now);
+        machineStates.shift();machineStates.push(isStale?0:(st||0));
         drawChart();
-
-        const statusEl = document.getElementById('conn-status');
-        if (isStale || !data.connected) {
-            statusEl.textContent = 'STALE DATA — PLC UNREACHABLE';
-            statusEl.className = 'fault';
-        } else {
-            statusEl.textContent = 'CONNECTED';
-            statusEl.className = 'ok';
-        }
-        
-        document.getElementById('last-update').textContent = 'updated ' + now;
-        const hts = document.getElementById('header-timestamp');
-        if (hts) hts.textContent = isStale ? '—' : (data.timestamp || '—');
-
-        const upd = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = isStale ? '—' : v; };
-        upd('feet-value',   data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
+        const statusEl=document.getElementById('conn-status');
+        if (isStale||!data.connected) { statusEl.textContent='STALE DATA — PLC UNREACHABLE'; statusEl.className='fault'; }
+        else { statusEl.textContent='CONNECTED'; statusEl.className='ok'; }
+        document.getElementById('last-update').textContent='updated '+now;
+        const hts=document.getElementById('header-timestamp');
+        if (hts) hts.textContent=isStale?'—':(data.timestamp||'—');
+        const upd=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=isStale?'—':v;};
+        upd('feet-value',   data.puller_pos_feet ? data.puller_pos_feet.toFixed(2) : '—');
         upd('table-value',  ts ? ts.toFixed(4) : '—');
-        upd('table-rpm-value', ts ? (ts * 60).toFixed(1) : '—');
+        upd('table-rpm-value', ts ? (ts*60).toFixed(1) : '—');
         upd('puller-value', ps ? ps.toFixed(4) : '—');
         upd('ratio-value',  sr ? sr.toFixed(5) : '—');
-        // Taper sensor — show — when 0 (sensor not active) or null
-        const taperEl = document.getElementById('taper-value');
-        if (taperEl) {
-            if (data.taper_sensor !== null && data.taper_sensor !== undefined && data.taper_sensor > 0) {
-                taperEl.textContent = data.taper_sensor.toFixed(2);
-            } else {
-                taperEl.textContent = '—';
-            }
+        const taperEl=document.getElementById('taper-value');
+        if (taperEl) taperEl.textContent=(data.taper_sensor!==null&&data.taper_sensor>0)?data.taper_sensor.toFixed(2):'—';
+        upd('puller-vel-err', data.puller_vel_cmd_err!==null&&data.puller_vel_cmd_err!==undefined?data.puller_vel_cmd_err.toFixed(5):'—');
+        upd('table-vel-fb',   data.table_vel_feedback!==null&&data.table_vel_feedback!==undefined?data.table_vel_feedback.toFixed(4):'—');
+        upd('recover-step', data.recover_step!==null?data.recover_step:'—');
+        upd('vfd-actual',   data.vfd_freq_actual!==null?data.vfd_freq_actual:'—');
+        upd('vfd-command',  data.vfd_freq_command!==null?data.vfd_freq_command:'—');
+        upd('vfd-delta',    data.vfd_freq_delta!==null?data.vfd_freq_delta:'0');
+        const vfdRef=document.getElementById('vfd-at-ref');
+        if (vfdRef) vfdRef.innerHTML=data.vfd_at_ref?'&nbsp;<span class="ok">AT REF</span>':'';
+        upd('wb-value', wb!==null?wb:'—');
+        function setSafety(id,ok,okText,faultText,faultClass) {
+            const el=document.getElementById(id); if (!el) return;
+            el.textContent=(ok&&!isStale)?'✓ '+okText:'✗ '+(isStale?'DATA STALE':faultText);
+            el.className=(ok&&!isStale)?'ok':faultClass;
         }
-        const taperUnit = document.getElementById('taper-unit');
-        if (taperUnit) {
-            taperUnit.textContent = (data.sensor_mode ? 'sensor active' : 'sensor off') + ' — units TBD';
-        }
-        upd('table-vel-error', data.table_vel_error !== null && data.table_vel_error !== undefined
-            ? data.table_vel_error.toFixed(5) : '—');
-        upd('puller-vel-err', data.puller_vel_cmd_err !== null && data.puller_vel_cmd_err !== undefined
-            ? data.puller_vel_cmd_err.toFixed(5) : '—');
-        upd('puller-vel-err2', data.puller_vel_cmd_err !== null && data.puller_vel_cmd_err !== undefined
-            ? data.puller_vel_cmd_err.toFixed(5) : '—');
-        upd('seq-step',      data.sequence_step      !== null ? data.sequence_step      : '—');
-        upd('recover-pos',   data.recover_position   !== null && data.recover_position > 0
-            ? data.recover_position.toFixed(3) : '—');
-        upd('msg-scroll',    data.machine_msg_scroll !== null ? data.machine_msg_scroll : '—');
-        upd('seg-end',       data.tablepos_endofseg  !== null && data.tablepos_endofseg !== undefined
-            ? 'End: ' + data.tablepos_endofseg.toFixed(3) : 'End: —');
-        upd('seg-last',      data.tablepos_endoflastseg !== null && data.tablepos_endoflastseg !== undefined
-            ? data.tablepos_endoflastseg.toFixed(3) : '—');
-        // Servo health
-        function setServoSpan(id, ok, okText, faultText) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.textContent = ok ? '✓ ' + okText : '✗ ' + faultText;
-            el.className = ok ? 'ok' : 'fault blink';
-        }
-        setServoSpan('servo-puller-ok',    data.puller_servo_ok,  'Puller OK', 'Puller FAULT');
-        setServoSpan('servo-table-ok',     data.table_servo_ok,   'Table OK',  'Table FAULT');
-        setServoSpan('servo-group-fault',  !data.group_fault,     'Group OK',  'Group Fault');
-        // Lamps
-        const lampRun  = document.getElementById('lamp-run');
-        const lampStop = document.getElementById('lamp-stopped');
-        if (lampRun)  { lampRun.textContent  = data.lamp_running ? '● Running'  : '○ Running';
-                        lampRun.className    = data.lamp_running ? 'ok' : 'muted'; }
-        if (lampStop) { lampStop.textContent = data.lamp_stopped ? '● Stopped'  : '○ Stopped';
-                        lampStop.className   = data.lamp_stopped ? 'fault' : 'ok'; }
-        // Segment distances
-        upd('puller-seg-dist', data.puller_current_dist !== null && data.puller_current_dist !== undefined
-            ? data.puller_current_dist.toFixed(2) : '—');
-        upd('table-seg-dist',  data.table_current_dist  !== null && data.table_current_dist  !== undefined
-            ? data.table_current_dist.toFixed(2) : '—');
-        upd('recover-step',    data.recover_step !== null ? data.recover_step : '—');
-        // Individual faults
-        function setFault(id, active, okText, faultText) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.textContent = active ? '✗ ' + faultText : '✓ ' + okText;
-            el.className   = active ? 'fault blink' : 'ok';
+        setSafety('safety-estop',   data.estop_ok,          'E-Stop',   'E-STOP PRESSED','fault blink');
+        setSafety('safety-door',    data.door_ok,           'Door',     'Door Open',     'warn');
+        setSafety('safety-guards',  data.guards_ok,         'Guards',   'Guards Open',   'fault');
+        setSafety('safety-motor',   !data.i_table_motor_ol, 'Motor OK', 'MOTOR OL',      'fault blink');
+        setSafety('safety-triaxial',!data.i_triaxial_wb,    'Triaxial OK','TRIAXIAL WB', 'fault blink');
+        setSafety('safety-core',    !data.core_break,       'Core OK',  'CORE BREAK',    'fault blink');
+        function setFault(id,active,okText,faultText) {
+            const el=document.getElementById(id); if(!el)return;
+            el.textContent=active?'✗ '+faultText:'✓ '+okText;
+            el.className=active?'fault blink':'ok';
         }
         setFault('fault-wb',     data.fault_wire_break,   'Wire Break',  'Wire Break');
         setFault('fault-es',     data.fault_estop,        'E-Stop',      'E-Stop');
         setFault('fault-puller', data.fault_puller_servo, 'Puller Servo','Puller Servo');
         setFault('fault-table',  data.fault_table_servo,  'Table Servo', 'Table Servo');
-        // Buttons
-        function setBtn(id, active, activeText, inactiveText, activeClass) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.textContent = active ? activeText : inactiveText;
-            el.className   = active ? activeClass : 'muted';
-        }
-        setBtn('btn-start',   data.start_pb,   '▶ START pressed', '○ Start',   'ok');
-        setBtn('btn-jog-fwd', data.jog_fwd,    '▶ JOG FWD',       '○ Jog Fwd', 'warn');
-        setBtn('btn-jog-rev', data.jog_rev,    '◀ JOG REV',       '○ Jog Rev', 'warn');
-        setBtn('btn-ok-jog',  data.ok_to_jog,  '✓ Jog Permitted', '✗ Jog Locked', 'ok');
-        // No motion
-        const noMotEl = document.getElementById('no-motion');
-        if (noMotEl) { noMotEl.textContent = data.master_no_motion ? 'YES' : 'NO';
-                       noMotEl.className   = data.master_no_motion ? 'warn' : 'ok'; }
-        upd('vfd-actual',   data.vfd_freq_actual   !== null ? data.vfd_freq_actual   : '—');
-        upd('vfd-command',  data.vfd_freq_command  !== null ? data.vfd_freq_command  : '—');
-        upd('vfd-delta',    data.vfd_freq_delta    !== null ? data.vfd_freq_delta    : '0');
-        const vfdRef = document.getElementById('vfd-at-ref');
-        if (vfdRef) vfdRef.innerHTML = data.vfd_at_ref ? '&nbsp;<span class="ok">AT REF</span>' : '';
-        upd('wb-value',     wb !== null ? wb : '—');
-
-        function setSafety(id, ok, okText, faultText, faultClass) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.textContent = (ok && !isStale) ? '✓ ' + okText : '✗ ' + (isStale ? 'DATA STALE' : faultText);
-            el.className = (ok && !isStale) ? 'ok' : faultClass;
-        }
-        setSafety('safety-estop',    data.estop_ok,        'E-Stop',    'E-STOP PRESSED', 'fault blink');
-        setSafety('safety-door',     data.door_ok,         'Door',      'Door Open',      'warn');
-        setSafety('safety-guards',   data.guards_ok,       'Guards',    'Guards Open',    'fault');
-        setSafety('safety-motor',    !data.i_table_motor_ol,'Motor OK', 'MOTOR OL',       'fault blink');
-        setSafety('safety-triaxial', !data.i_triaxial_wb,  'Triaxial OK','TRIAXIAL WB',  'fault blink');
-        setSafety('safety-core',     !data.core_break,     'Core OK',   'CORE BREAK',     'fault blink');
-
-        const elapsed = data.state_elapsed_s;
-        const elapsedEl = document.getElementById('elapsed-value');
+        const elapsed=data.state_elapsed_s;
+        const elapsedEl=document.getElementById('elapsed-value');
         if (elapsedEl) {
-            if (elapsed && !isStale) {
-                const h = Math.floor(elapsed / 3600);
-                const m = Math.floor((elapsed % 3600) / 60);
-                elapsedEl.textContent = h + 'h ' + m + 'm';
-            } else {
-                elapsedEl.textContent = '—';
-            }
+            if (elapsed&&!isStale) {
+                const h=Math.floor(elapsed/3600), m=Math.floor((elapsed%3600)/60);
+                elapsedEl.textContent=h+'h '+m+'m';
+            } else { elapsedEl.textContent='—'; }
         }
-
-       // ── Daily Equipment Utilization Pie Chart calculation ────────────────
-        const pcts = data.daily_state_pcts || {};
-        const oeeEl = document.getElementById('oee-value');
-        const legendEl = document.getElementById('oee-legend');
-        const pieCanvas = document.getElementById('oeePieCanvas');
-
-        // Color definitions matching the style scheme in braider_analysis.py
-        const stateColors = {
-            'RUNNING':  '#66bb6a', // Green
-            'READY':    '#4fc3f7', // Light Blue
-            'STOPPED':  '#ef5350', // Red
-            'PAUSED':   '#ffa726', // Orange
-            'OFF':      '#78909c', // Gray
-            'FAULT':    '#d32f2f', // Dark Red
-            'ABORTED':  '#b71c1c', 
-            'UNKNOWN':  '#555555'
-        };
-
-        if (oeeEl && Object.keys(pcts).length > 0 && !isStale) {
-            // Main Utilization Percentage is time spent in RUNNING state
-            const runningPct = pcts['RUNNING'] || 0;
-            oeeEl.textContent = runningPct.toFixed(1) + '%';
-
-            // Force the inline CSS style color directly to ensure class defaults are ignored
-            if (runningPct >= 50) {
-                oeeEl.style.color = '#66bb6a'; // Green (ok)
-            } else if (runningPct >= 25) {
-                oeeEl.style.color = '#ffa726'; // Yellow/Orange (warn)
-            } else {
-                oeeEl.style.color = '#ef5350'; // Red (fault)
+        const pcts=data.daily_state_pcts||{};
+        const oeeEl=document.getElementById('oee-value'), legendEl=document.getElementById('oee-legend');
+        const pieCanvas=document.getElementById('oeePieCanvas');
+        const stateColors={'RUNNING':'#66bb6a','READY':'#4fc3f7','STOPPED':'#ef5350','PAUSED':'#ffa726','OFF':'#78909c','ABORTED':'#b71c1c','UNKNOWN':'#555555'};
+        if (oeeEl&&Object.keys(pcts).length>0&&!isStale) {
+            const runningPct=pcts['RUNNING']||0;
+            oeeEl.textContent=runningPct.toFixed(1)+'%';
+            oeeEl.style.color=runningPct>=50?'#66bb6a':runningPct>=25?'#ffa726':'#ef5350';
+            let legendHTML='';
+            for (const [state,pct] of Object.entries(pcts)) {
+                const color=stateColors[state]||'#999';
+                legendHTML+=`<div><span style="display:inline-block;width:8px;height:8px;background:${color};margin-right:4px;border-radius:2px;"></span>${state}: ${pct}%</div>`;
             }
-
-            // Generate textual legend details
-            let legendHTML = '';
-            for (const [state, pct] of Object.entries(pcts)) {
-                const color = stateColors[state] || '#999';
-                legendHTML += `<div><span style="display:inline-block; width:8px; height:8px; background:${color}; margin-right:4px; border-radius:2px;"></span>${state}: ${pct}%</div>`;
-            }
-            if (legendEl) legendEl.innerHTML = legendHTML;
-
-            // Render the Canvas Pie Chart
+            if (legendEl) legendEl.innerHTML=legendHTML;
             if (pieCanvas) {
-                const ctx = pieCanvas.getContext('2d');
-                ctx.clearRect(0, 0, 110, 110);
-                const cx = 55, cy = 55, r = 50;
-                let startAngle = -Math.PI / 2;
-                for (const [state, pct] of Object.entries(pcts)) {
-                    if (pct <= 0) continue;
-                    const sliceAngle = (pct / 100) * (2 * Math.PI);
-                    ctx.beginPath();
-                    ctx.moveTo(cx, cy);
-                    ctx.arc(cx, cy, r, startAngle, startAngle + sliceAngle);
-                    ctx.closePath();
-                    ctx.fillStyle = stateColors[state] || '#999';
-                    ctx.fill();
-                    ctx.strokeStyle = '#0d1117';
-                    ctx.lineWidth = 1.5;
-                    ctx.stroke();
-                    startAngle += sliceAngle;
+                const ctx=pieCanvas.getContext('2d'); ctx.clearRect(0,0,110,110);
+                const cx=55,cy=55,r=50; let startAngle=-Math.PI/2;
+                for (const [state,pct] of Object.entries(pcts)) {
+                    if (pct<=0) continue;
+                    const sliceAngle=(pct/100)*(2*Math.PI);
+                    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,startAngle,startAngle+sliceAngle);
+                    ctx.closePath(); ctx.fillStyle=stateColors[state]||'#999'; ctx.fill();
+                    ctx.strokeStyle='#0d1117'; ctx.lineWidth=1.5; ctx.stroke();
+                    startAngle+=sliceAngle;
                 }
-                // Donut hole
-                ctx.beginPath();
-                ctx.arc(cx, cy, r * 0.52, 0, Math.PI * 2);
-                ctx.fillStyle = '#161b22';
-                ctx.fill();
+                ctx.beginPath(); ctx.arc(cx,cy,r*0.52,0,Math.PI*2); ctx.fillStyle='#161b22'; ctx.fill();
             }
         } else if (oeeEl) {
-            oeeEl.textContent = '—';
-            oeeEl.className = 'value';
-            if (legendEl) legendEl.textContent = isStale ? 'Data stale' : 'Waiting for metrics...';
-            if (pieCanvas) {
-                const ctx = pieCanvas.getContext('2d');
-                ctx.clearRect(0, 0, 110, 110);
-            }
+            oeeEl.textContent='—';
+            if (legendEl) legendEl.textContent=isStale?'Data stale':'Waiting...';
         }
-
-        const stateEl = document.getElementById('state-value');
+        const stateEl=document.getElementById('state-value');
         if (stateEl) {
-            stateEl.textContent = isStale ? 'UNKNOWN (DISCONNECTED)' : (data.state_name || '—');
-            const stateDiv = document.getElementById('state-div');
-            if (stateDiv) {
-                stateDiv.className = 'value ' + (
-                    isStale                  ? 'stopped' :
-                    st === 16                ? 'running' :
-                    st === 256 || st === 512 ? 'fault blink' :
-                    st === 64  || st === 128 ? 'paused' : 'stopped'
-                );
-            }
+            stateEl.textContent=isStale?'UNKNOWN (DISCONNECTED)':(data.state_name||'—');
+            const stateDiv=document.getElementById('state-div');
+            if (stateDiv) stateDiv.className='value '+(isStale?'stopped':st===16?'running':st===256||st===512?'fault blink':st===64||st===128?'paused':'stopped');
         }
-
-        const wbDiv = document.getElementById('wb-div');
-        if (wbDiv) {
-            wbDiv.className = 'value ' + (wb !== null && wb !== 3 && !isStale ? 'fault blink' : 'ok');
-        }
-
-        const faultDiv  = document.getElementById('fault-div');
-        const faultUnit = document.getElementById('fault-unit');
-        if (faultDiv) {
-            const hasFault = !data.no_faults;
-            faultDiv.className = 'value ' + ((hasFault && !isStale) ? 'fault blink' : 'ok');
-            faultDiv.textContent = isStale ? 'UNKNOWN' : (hasFault ? 'FAULT' : 'NONE');
-        }
-        if (faultUnit && data.machine_faults && data.machine_faults !== 4 && !isStale) {
-            faultUnit.textContent = 'code: ' + data.machine_faults;
-        } else if (faultUnit) {
-            faultUnit.textContent = '';
-        }
-
-        if (soundEnabled && !isStale) {
-            if (wb !== lastWBBits && wb !== 3 && st === 16) alertWireBreak();
-            else if (st !== lastState && lastState !== null) alertStateChange();
-        }
-        if (!isStale) {
-            lastState = st; 
-            lastWBBits = wb;
-        }
-
+        const wbDiv=document.getElementById('wb-div');
+        if (wbDiv) wbDiv.className='value '+(wb!==null&&wb!==3&&!isStale?'fault blink':'ok');
+        const faultDiv=document.getElementById('fault-div'), faultUnit=document.getElementById('fault-unit');
+        if (faultDiv) { const hf=!data.no_faults; faultDiv.className='value '+((hf&&!isStale)?'fault blink':'ok'); faultDiv.textContent=isStale?'UNKNOWN':(hf?'FAULT':'NONE'); }
+        if (faultUnit&&data.machine_faults&&data.machine_faults!==4&&!isStale) faultUnit.textContent='code: '+data.machine_faults;
+        else if (faultUnit) faultUnit.textContent='';
+        lastState=st; lastWBBits=wb;
     } catch(e) {
-        const cs = document.getElementById('conn-status');
-        if (cs) { cs.textContent = 'DISCONNECTED'; cs.className = 'fault'; }
+        const cs=document.getElementById('conn-status');
+        if (cs) { cs.textContent='DISCONNECTED'; cs.className='fault'; }
     }
 }
 
@@ -1731,6 +1477,7 @@ fetchAndUpdate();
 
 app = Flask(__name__)
 
+
 @app.route('/')
 def dashboard():
     with _lock:
@@ -1741,179 +1488,118 @@ def dashboard():
         plc_ip=PLC_IP,
         log_dir=LOG_DIR,
         braider_id=BRAIDER_ID,
+        normal_wire_bits=NORMAL_WIRE_BITS,
     )
+
 
 @app.route('/api/latest')
 def api_latest():
     with _lock:
         return jsonify(_latest)
 
+
 @app.route('/favicon.ico')
 def favicon():
-    return '', 204  
-
-
+    return '', 204
 
 
 # ── Floor Report ──────────────────────────────────────────────────────────────
 
 def get_floor_report_data():
-    """Builds today's floor report from process_log and event_log."""
-    import csv as csv_mod
-    from datetime import date, timedelta
+    import glob
+    from datetime import date, timedelta, datetime as dt
 
     today_str     = date.today().isoformat()
     yesterday_str = (date.today() - timedelta(days=1)).isoformat()
 
     def read_today_rows(filepath, today):
         rows = []
-        # Read from live file
         if os.path.exists(filepath):
             try:
                 with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
-                    all_rows = list(csv_mod.DictReader(f))
+                    all_rows = list(csv.DictReader(f))
                 for row in reversed(all_rows):
-                    ts = row.get('Timestamp', '')
-                    if ts.startswith(today):
+                    if row.get('Timestamp', '').startswith(today):
                         rows.append(row)
                     elif rows:
                         break
                 rows.reverse()
             except Exception:
                 pass
-
-        # Also check archived files from today — covers restarts mid-shift
-        import glob, re
         base = filepath.replace('.csv', '')
-        pattern = base + '_archived_' + today.replace('-', '') + '*.csv'
-        for archive in sorted(glob.glob(pattern)):
+        for archive in sorted(glob.glob(base + '_archived_' + today.replace('-','') + '*.csv')):
             try:
                 with open(archive, newline='', encoding='utf-8', errors='replace') as f:
-                    archive_rows = [r for r in csv_mod.DictReader(f)
-                                    if r.get('Timestamp', '').startswith(today)]
-                # Prepend archive rows — they come before live rows
-                rows = archive_rows + rows
+                    rows = [r for r in csv.DictReader(f) if r.get('Timestamp','').startswith(today)] + rows
             except Exception:
                 pass
-
-        # Deduplicate by timestamp, keep order
-        seen = set()
-        deduped = []
+        seen = set(); deduped = []
         for row in rows:
-            ts = row.get('Timestamp', '')
-            if ts not in seen:
-                seen.add(ts)
-                deduped.append(row)
+            t = row.get('Timestamp','')
+            if t not in seen: seen.add(t); deduped.append(row)
         return deduped
-
-    def read_day_rows(filepath, day):
-        rows = []
-        if not os.path.exists(filepath):
-            return rows
-        try:
-            with open(filepath, newline='', encoding='utf-8', errors='replace') as f:
-                for row in csv_mod.DictReader(f):
-                    if row.get('Timestamp', '').startswith(day):
-                        rows.append(row)
-        except Exception:
-            pass
-        return rows
 
     proc_rows  = read_today_rows(PROCESS_LOG, today_str)
     event_rows = read_today_rows(EVENT_LOG,   today_str)
 
-    # State breakdown
     state_counts = {}
     for row in proc_rows:
-        s = row.get('State_Name', 'UNKNOWN') or 'UNKNOWN'
-        state_counts[s] = state_counts.get(s, 0) + 1
+        s = row.get('State_Name','UNKNOWN') or 'UNKNOWN'
+        state_counts[s] = state_counts.get(s,0) + 1
 
-    total_rows   = len(proc_rows)
-    def pct(n):  return round(100 * n / total_rows, 1) if total_rows else 0
-    def hrs(n):  return round(n * 2 / 3600, 2) if n else 0
+    total_rows = len(proc_rows)
+    def pct(n): return round(100*n/total_rows,1) if total_rows else 0
+    def hrs(n): return round(n*2/3600,2) if n else 0
 
-    running_rows = state_counts.get('RUNNING', 0)
-    off_rows     = state_counts.get('OFF', 0)
-    stopped_rows = state_counts.get('STOPPED', 0)
+    running_rows = state_counts.get('RUNNING',0)
+    off_rows     = state_counts.get('OFF',0)
+    stopped_rows = state_counts.get('STOPPED',0)
 
-    # Vessels completed — RUNNING → OFF or STOPPED transition with min 25ft threshold
-    vessels = 0
-    prev_state = None
-    run_start_feet = None
-    VESSEL_MIN_FEET = 25.0
-
+    vessels = 0; prev_s = None; run_start_feet = None; VESSEL_MIN_FEET = 25.0
     for row in proc_rows:
-        s  = row.get('State_Name', '')
-        try:
-            feet = float(row.get('Puller_Pos_Feet') or 0)
-        except:
-            feet = 0.0
+        s = row.get('State_Name','')
+        try: feet = float(row.get('Puller_Pos_Feet') or 0)
+        except: feet = 0.0
+        if s=='RUNNING' and prev_s!='RUNNING': run_start_feet=feet
+        elif prev_s=='RUNNING' and s in ('OFF','STOPPED','STOPPING'):
+            if run_start_feet is not None and abs(feet-run_start_feet)>=VESSEL_MIN_FEET: vessels+=1
+            run_start_feet=None
+        prev_s=s
 
-        if s == 'RUNNING' and prev_state != 'RUNNING':
-            run_start_feet = feet
-        elif prev_state == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
-            if run_start_feet is not None:
-                feet_produced = abs(feet - run_start_feet)
-                if feet_produced >= VESSEL_MIN_FEET:
-                    vessels += 1
-            run_start_feet = None
-        prev_state = s
-
-    # Bobbin changeovers — OFF state durations > 5 min
-    changeovers  = []
-    in_off       = False
-    off_start_ts = None
+    changeovers=[]; in_off=False; off_start_ts=None
     for row in proc_rows:
-        s  = row.get('State_Name', '')
-        ts = row.get('Timestamp', '')
-        if s == 'OFF' and not in_off:
-            in_off = True; off_start_ts = ts
-        elif s != 'OFF' and in_off:
-            in_off = False
+        s=row.get('State_Name',''); ts_=row.get('Timestamp','')
+        if s=='OFF' and not in_off: in_off=True; off_start_ts=ts_
+        elif s!='OFF' and in_off:
+            in_off=False
             if off_start_ts:
                 try:
-                    from datetime import datetime as dt
-                    dur = (dt.fromisoformat(ts) - dt.fromisoformat(off_start_ts)).total_seconds() / 60
-                    if dur > 5:
-                        changeovers.append({'start': off_start_ts, 'end': ts, 'min': round(dur, 1)})
-                except Exception:
-                    pass
+                    dur=(dt.fromisoformat(ts_)-dt.fromisoformat(off_start_ts)).total_seconds()/60
+                    if dur>5: changeovers.append({'start':off_start_ts,'end':ts_,'min':round(dur,1)})
+                except Exception: pass
 
-    avg_co = round(sum(c['min'] for c in changeovers) / len(changeovers), 1) if changeovers else None
-    min_co = min((c['min'] for c in changeovers), default=None)
-    max_co = max((c['min'] for c in changeovers), default=None)
+    avg_co=round(sum(c['min'] for c in changeovers)/len(changeovers),1) if changeovers else None
+    min_co=min((c['min'] for c in changeovers),default=None)
+    max_co=max((c['min'] for c in changeovers),default=None)
 
-    # Timeline from event_log
-    timeline = []
-    wire_breaks = 0
+    timeline=[]; wire_breaks=0
     for row in event_rows:
-        etype = row.get('Event_Type', '')
-        if etype == 'STATE_CHANGE':
-            timeline.append({'time': row.get('Timestamp', '')[:19],
-                             'from_state': row.get('From_State', ''),
-                             'to_state':   row.get('To_State', ''),
-                             'feet':       row.get('Puller_Pos_Feet', '')})
-        elif etype == 'WIRE_BREAK':
-            wire_breaks += 1
-            timeline.append({'time': row.get('Timestamp', '')[:19],
-                             'from_state': 'WIRE BREAK', 'to_state': '',
-                             'feet':       row.get('Puller_Pos_Feet', '')})
+        etype=row.get('Event_Type','')
+        if etype=='STATE_CHANGE':
+            timeline.append({'time':row.get('Timestamp','')[:19],'from_state':row.get('From_Value',''),'to_state':row.get('To_Value',''),'feet':row.get('Puller_Feet','')})
+        elif etype=='WIRE_BREAK':
+            wire_breaks+=1
+            timeline.append({'time':row.get('Timestamp','')[:19],'from_state':'WIRE BREAK','to_state':row.get('Detail',''),'feet':row.get('Puller_Feet','')})
 
-    # Yesterday comparison
-    yest_rows    = read_day_rows(PROCESS_LOG, yesterday_str)
-    yest_total   = len(yest_rows)
-    yest_running = sum(1 for r in yest_rows if r.get('State_Name') == 'RUNNING')
-    yest_run_pct = round(100 * yest_running / yest_total, 1) if yest_total else None
-    yest_vessels = 0
-    prev = None
-    for row in yest_rows:
-        s = row.get('State_Name', '')
-        if prev == 'RUNNING' and s in ('OFF', 'STOPPED', 'STOPPING'):
-            yest_vessels += 1
-        prev = s
-
-    VESSEL_TARGET      = 4
-    RUNNING_TARGET_PCT = 55.0
+    if os.path.exists(PROCESS_LOG):
+        try:
+            with open(PROCESS_LOG, newline='', encoding='utf-8', errors='replace') as f:
+                yest_rows=[r for r in csv.DictReader(f) if r.get('Timestamp','').startswith(yesterday_str)]
+        except Exception: yest_rows=[]
+    else: yest_rows=[]
+    yest_total=len(yest_rows)
+    yest_running=sum(1 for r in yest_rows if r.get('State_Name')=='RUNNING')
+    yest_run_pct=round(100*yest_running/yest_total,1) if yest_total else None
 
     return {
         'date':               today_str,
@@ -1924,8 +1610,8 @@ def get_floor_report_data():
         'off_pct':            pct(off_rows),
         'stopped_pct':        pct(stopped_rows),
         'vessels':            vessels,
-        'vessel_target':      VESSEL_TARGET,
-        'running_target_pct': RUNNING_TARGET_PCT,
+        'vessel_target':      4,
+        'running_target_pct': 55.0,
         'changeovers':        changeovers,
         'avg_changeover':     avg_co,
         'min_changeover':     min_co,
@@ -1933,458 +1619,190 @@ def get_floor_report_data():
         'wire_breaks':        wire_breaks,
         'timeline':           timeline,
         'yest_running_pct':   yest_run_pct,
-        'yest_vessels':       yest_vessels,
     }
 
 
 FLOOR_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta http-equiv="refresh" content="60">
 <title>Braider 2 — Floor Report</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background:#0d1117; color:#e6edf3; font-family:'Segoe UI',Arial,sans-serif; padding:20px; }
-h1 { font-size:2rem; color:#58a6ff; margin-bottom:4px; }
-.subtitle { color:#8b949e; font-size:1rem; margin-bottom:24px; }
-.scorecard { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-bottom:28px; }
-.card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px 16px; text-align:center; }
-.card.green  { border-color:#238636; }
-.card.red    { border-color:#da3633; }
-.card.yellow { border-color:#9e6a03; }
-.card.blue   { border-color:#1f6feb; }
-.card-label  { font-size:.78rem; color:#8b949e; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
-.card-value  { font-size:2.6rem; font-weight:700; line-height:1; }
-.card-sub    { font-size:.82rem; color:#8b949e; margin-top:5px; }
-.card-vs     { font-size:.8rem; margin-top:6px; }
-.up   { color:#3fb950; } .down { color:#f85149; } .same { color:#8b949e; }
-.bar-wrap { background:#21262d; border-radius:4px; height:8px; margin-top:10px; overflow:hidden; }
-.bar-fill  { height:100%; border-radius:4px; }
-.bar-green  { background:#238636; } .bar-yellow { background:#9e6a03; } .bar-red { background:#da3633; }
-.section-title { font-size:1.1rem; font-weight:600; color:#58a6ff; margin-bottom:12px;
-                 border-bottom:1px solid #21262d; padding-bottom:6px; }
-.section { margin-bottom:28px; }
-table { width:100%; border-collapse:collapse; font-size:.9rem; }
-th { background:#161b22; color:#8b949e; text-align:left; padding:8px 12px; font-weight:600;
-     font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; }
-td { padding:8px 12px; border-top:1px solid #21262d; }
-tr:hover td { background:#161b22; }
-.badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:.78rem; font-weight:600; }
-.badge-running  { background:#1a4a1a; color:#3fb950; }
-.badge-off      { background:#1f2a3c; color:#58a6ff; }
-.badge-stopped  { background:#3c1a1a; color:#f85149; }
-.badge-starting { background:#1a2a3c; color:#79c0ff; }
-.badge-stopping { background:#3c2a1a; color:#d29922; }
-.badge-break    { background:#4a3000; color:#e3b341; }
-.badge-other    { background:#21262d; color:#8b949e; }
-.timeline { list-style:none; }
-.timeline li { display:flex; align-items:flex-start; gap:14px; padding:10px 0;
-               border-top:1px solid #21262d; font-size:.9rem; }
-.tl-time { color:#8b949e; min-width:85px; font-family:monospace; font-size:.85rem; }
-.tl-feet { color:#8b949e; font-size:.8rem; margin-left:auto; }
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
-@media(max-width:700px){ .two-col{ grid-template-columns:1fr; } }
-.footer { color:#444; font-size:.78rem; margin-top:20px; text-align:center; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',Arial,sans-serif;padding:20px}
+h1{font-size:2rem;color:#58a6ff;margin-bottom:4px}
+.subtitle{color:#8b949e;font-size:1rem;margin-bottom:24px}
+.scorecard{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 16px;text-align:center}
+.card.green{border-color:#238636}.card.red{border-color:#da3633}.card.yellow{border-color:#9e6a03}.card.blue{border-color:#1f6feb}
+.card-label{font-size:.78rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.card-value{font-size:2.6rem;font-weight:700;line-height:1}
+.card-sub{font-size:.82rem;color:#8b949e;margin-top:5px}
+.up{color:#3fb950}.down{color:#f85149}.same{color:#8b949e}
+.bar-wrap{background:#21262d;border-radius:4px;height:8px;margin-top:10px;overflow:hidden}
+.bar-fill{height:100%;border-radius:4px}.bar-green{background:#238636}.bar-yellow{background:#9e6a03}.bar-red{background:#da3633}
+.section-title{font-size:1.1rem;font-weight:600;color:#58a6ff;margin-bottom:12px;border-bottom:1px solid #21262d;padding-bottom:6px}
+.section{margin-bottom:28px}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th{background:#161b22;color:#8b949e;text-align:left;padding:8px 12px;font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+td{padding:8px 12px;border-top:1px solid #21262d}
+.footer{color:#444;font-size:.78rem;margin-top:20px;text-align:center}
 </style>
 </head>
 <body>
-
 <h1>Braider 2 — Daily Performance</h1>
-<div class="subtitle">{{ d.date }} &nbsp;·&nbsp; Refreshes every 60s
-  &nbsp;·&nbsp; {{ d.total_hrs }}h logged today</div>
-
+<div class="subtitle">{{ d.date }} &nbsp;·&nbsp; Refreshes every 60s &nbsp;·&nbsp; {{ d.total_hrs }}h logged today</div>
 <div class="scorecard">
-
-
-
   {% set r_color = 'green' if d.running_pct >= d.running_target_pct else ('yellow' if d.running_pct >= d.running_target_pct - 10 else 'red') %}
   <div class="card {{ r_color }}">
     <div class="card-label">Running Today</div>
     <div class="card-value" style="color:{% if r_color=='green' %}#3fb950{% elif r_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.running_pct }}%</div>
     <div class="card-sub">{{ d.running_hrs }}h · Target {{ d.running_target_pct }}%</div>
     {% if d.yest_running_pct is not none %}
-    <div class="card-vs">
-      {% set diff = (d.running_pct - d.yest_running_pct)|round(1) %}
-      {% if diff > 0 %}<span class="up">▲ {{ diff }}% vs yesterday</span>
-      {% elif diff < 0 %}<span class="down">▼ {{ diff|abs }}% vs yesterday</span>
+    <div style="font-size:.8rem;margin-top:6px">
+      {% set diff=(d.running_pct - d.yest_running_pct)|round(1) %}
+      {% if diff>0 %}<span class="up">▲ {{ diff }}% vs yesterday</span>
+      {% elif diff<0 %}<span class="down">▼ {{ diff|abs }}% vs yesterday</span>
       {% else %}<span class="same">= same as yesterday</span>{% endif %}
     </div>{% endif %}
     <div class="bar-wrap"><div class="bar-fill bar-{{ r_color }}" style="width:{{ [100,d.running_pct|int]|min }}%"></div></div>
   </div>
-
-  {% set c_color = 'green' if d.avg_changeover and d.avg_changeover <= 50 else ('yellow' if d.avg_changeover and d.avg_changeover <= 65 else 'red') %}
+  {% set c_color = 'green' if d.avg_changeover and d.avg_changeover<=50 else ('yellow' if d.avg_changeover and d.avg_changeover<=65 else 'red') %}
   <div class="card {{ c_color if d.avg_changeover else 'blue' }}">
     <div class="card-label">Avg Changeover</div>
-    <div class="card-value" style="color:{% if c_color=='green' %}#3fb950{% elif c_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">
-      {% if d.avg_changeover %}{{ d.avg_changeover }}<span style="font-size:1.2rem">m</span>
-      {% else %}<span style="font-size:1.4rem;color:#8b949e">—</span>{% endif %}
-    </div>
+    <div class="card-value">{% if d.avg_changeover %}{{ d.avg_changeover }}<span style="font-size:1.2rem">m</span>{% else %}<span style="font-size:1.4rem;color:#8b949e">—</span>{% endif %}</div>
     <div class="card-sub">{% if d.min_changeover %}Best {{ d.min_changeover }}m · Worst {{ d.max_changeover }}m{% else %}No changeovers yet{% endif %}</div>
-    <div class="card-sub" style="margin-top:4px">Target: ≤50 min</div>
+    <div class="card-sub">Target: ≤50 min</div>
   </div>
-
-  {% set w_color = 'green' if d.wire_breaks == 0 else ('yellow' if d.wire_breaks <= 2 else 'red') %}
+  {% set w_color = 'green' if d.wire_breaks==0 else ('yellow' if d.wire_breaks<=2 else 'red') %}
   <div class="card {{ w_color }}">
     <div class="card-label">Wire Breaks</div>
     <div class="card-value" style="color:{% if w_color=='green' %}#3fb950{% elif w_color=='yellow' %}#d29922{% else %}#f85149{% endif %}">{{ d.wire_breaks }}</div>
-    <div class="card-sub">{% if d.wire_breaks == 0 %}Clean day ✓{% elif d.wire_breaks == 1 %}1 break{% else %}{{ d.wire_breaks }} breaks{% endif %}</div>
+    <div class="card-sub">{% if d.wire_breaks==0 %}Clean day ✓{% else %}{{ d.wire_breaks }} break(s){% endif %}</div>
   </div>
-
-
-
 </div>
-
-<div>
-  <div class="section">
-    <div class="section-title">Bobbin Changeovers Today ({{ d.changeovers|length }})</div>
-    {% if d.changeovers %}
-    <table>
-      <thead><tr><th>#</th><th>Start</th><th>End</th><th>Duration</th><th>Rating</th></tr></thead>
-      <tbody>
-      {% for c in d.changeovers %}
-      <tr>
-        <td>{{ loop.index }}</td>
-        <td>{{ c.start[11:19] }}</td>
-        <td>{{ c.end[11:19] }}</td>
-        <td><strong>{{ c.min }} min</strong></td>
-        <td>{% if c.min <= 45 %}<span style="color:#3fb950">● Fast</span>
-            {% elif c.min <= 55 %}<span style="color:#d29922">● On time</span>
-            {% else %}<span style="color:#f85149">● Slow</span>{% endif %}</td>
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p style="color:#8b949e;padding:12px 0">No changeovers recorded yet today.</p>
-    {% endif %}
-  </div>
-
-
+<div class="section">
+  <div class="section-title">Bobbin Changeovers Today ({{ d.changeovers|length }})</div>
+  {% if d.changeovers %}
+  <table>
+    <thead><tr><th>#</th><th>Start</th><th>End</th><th>Duration</th><th>Rating</th></tr></thead>
+    <tbody>
+    {% for c in d.changeovers %}
+    <tr><td>{{ loop.index }}</td><td>{{ c.start[11:19] }}</td><td>{{ c.end[11:19] }}</td>
+    <td><strong>{{ c.min }} min</strong></td>
+    <td>{% if c.min<=45 %}<span style="color:#3fb950">● Fast</span>{% elif c.min<=55 %}<span style="color:#d29922">● On time</span>{% else %}<span style="color:#f85149">● Slow</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p style="color:#8b949e;padding:12px 0">No changeovers recorded yet today.</p>{% endif %}
 </div>
-
-<!-- ── Utilization Pie Charts ── -->
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:28px;">
-
-  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
-    <div class="section-title">Today — Midnight to Now</div>
-    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
-      <canvas id="todayPie" width="140" height="140" style="flex-shrink:0;"></canvas>
-      <div id="todayPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
-    </div>
-  </div>
-
-  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
-    <div class="section-title">This Week — Mon to Now</div>
-    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
-      <canvas id="weekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
-      <div id="weekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
-    </div>
-  </div>
-
-  <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;">
-    <div class="section-title">Last Week — Mon to Sun</div>
-    <div style="display:flex;align-items:center;gap:16px;padding:12px 0;">
-      <canvas id="lastWeekPie" width="140" height="140" style="flex-shrink:0;"></canvas>
-      <div id="lastWeekPieLegend" style="font-size:10px;line-height:1.9;color:#8b949e;"></div>
-    </div>
-  </div>
-
-</div>
-
-<!-- ── State Timeline Charts ── -->
-<div class="section" style="margin-top:8px;">
-  <div class="section-title">Today — Machine State Timeline</div>
-  <div id="todayChart" style="width:100%;height:200px;"></div>
-</div>
-
-<div class="section" style="margin-top:8px;">
-  <div class="section-title">This Week — Machine State Timeline</div>
-  <div id="weekChart" style="width:100%;height:200px;"></div>
-</div>
-
-<div class="section" style="margin-top:8px;">
-  <div class="section-title">Last Week — Machine State Timeline</div>
-  <div id="lastWeekChart" style="width:100%;height:200px;"></div>
-</div>
-
-<div class="footer">Braider 2 · braider2.local:5000/floor · Refreshes every 60s · Noble Gas Systems</div>
-
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-<script>
-const STATE_COLORS = {
-    'RUNNING':'#66bb6a','STOPPED':'#ef5350','OFF':'#455a64',
-    'READY':'#4fc3f7','STARTING':'#26c6da','STOPPING':'#ff7043',
-    'PAUSING':'#ffb74d','PAUSED':'#ffa726','ABORTING':'#ab47bc','ABORTED':'#b71c1c'
-};
-
-function buildStateChart(divId, data, title) {
-    if (!data.timestamps || !data.timestamps.length) {
-        document.getElementById(divId).innerHTML =
-            '<p style="color:#8b949e;padding:20px">No data yet — chart populates during production.</p>';
-        return;
-    }
-    const ts     = data.timestamps;
-    const states = data.states;
-    const traces = [];
-    const seen   = {};
-
-    for (let i = 0; i < ts.length; i++) {
-        const s = states[i];
-        if (!s) continue;
-        if (!seen[s]) seen[s] = true;
-        traces.push({s, t: ts[i]});
-    }
-
-    // One trace per state — scatter markers
-    const byState = {};
-    for (const pt of traces) {
-        if (!byState[pt.s]) byState[pt.s] = [];
-        byState[pt.s].push(pt.t);
-    }
-
-    const plotTraces = Object.entries(byState).map(([state, times]) => ({
-        x: times,
-        y: Array(times.length).fill(state),
-        mode: 'markers',
-        name: state,
-        marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
-        type: 'scatter'
-    }));
-
-    const layout = {
-        paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
-        font:{color:'#8b949e', size:11},
-        margin:{t:10, r:20, b:40, l:80},
-        height:220,
-        showlegend:true,
-        legend:{orientation:'h', y:-0.2, font:{size:10}},
-        xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
-        yaxis:{gridcolor:'#21262d', tickfont:{size:11}, categoryorder:'array',
-               categoryarray:['ABORTED','ABORTING','STOPPING','PAUSED','PAUSING','STOPPED','OFF','READY','STARTING','RUNNING']},
-    };
-
-    Plotly.newPlot(divId, plotTraces, layout, {responsive:true, displayModeBar:false});
-}
-
-function drawPie(canvasId, legendId, data) {
-    const canvas = document.getElementById(canvasId);
-    const legend = document.getElementById(legendId);
-    if (!canvas || !data.states || !data.states.length) return;
-
-    // Count rows per state
-    const counts = {};
-    for (const s of data.states) {
-        if (s) counts[s] = (counts[s] || 0) + 1;
-    }
-    const total = Object.values(counts).reduce((a,b) => a+b, 0);
-    if (!total) return;
-
-    const ORDER = ['RUNNING','OFF','STOPPED','READY','STARTING','STOPPING','PAUSING','PAUSED','ABORTING','ABORTED'];
-    const entries = ORDER.filter(s => counts[s])
-                         .map(s => [s, counts[s]])
-                         .concat(Object.entries(counts).filter(([s]) => !ORDER.includes(s)));
-
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width, H = canvas.height;
-    const cx = W/2, cy = H/2, r = Math.min(W,H)/2 - 4;
-    ctx.clearRect(0,0,W,H);
-
-    let angle = -Math.PI/2;
-    let legendHTML = '';
-    for (const [state, count] of entries) {
-        const sweep = (count/total) * Math.PI * 2;
-        const color = STATE_COLORS[state] || '#999';
-        ctx.beginPath();
-        ctx.moveTo(cx,cy);
-        ctx.arc(cx,cy,r,angle,angle+sweep);
-        ctx.closePath();
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = '#0d1117';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        const pct = (count/total*100).toFixed(1);
-        const hrs = (count*2/3600).toFixed(1);
-        legendHTML += `<div><span style="color:${color};font-weight:700;">■</span> ${state}: ${pct}% (${hrs}h)</div>`;
-        angle += sweep;
-    }
-    // Donut hole
-    ctx.beginPath();
-    ctx.arc(cx,cy,r*0.52,0,Math.PI*2);
-    ctx.fillStyle = '#161b22';
-    ctx.fill();
-    // Center text — running %
-    const runPct = counts['RUNNING'] ? (counts['RUNNING']/total*100).toFixed(0) : '0';
-    ctx.fillStyle = '#3fb950';
-    ctx.font = 'bold 22px Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(runPct + '%', cx, cy-8);
-    ctx.fillStyle = '#8b949e';
-    ctx.font = '10px Arial';
-    ctx.fillText('running', cx, cy+12);
-
-    if (legend) legend.innerHTML = legendHTML;
-}
-
-(async function() {
-    try {
-        const [todayRes, weekRes, lastWeekRes] = await Promise.all([
-            fetch('/api/floor_data?range=today'),
-            fetch('/api/floor_data?range=week'),
-            fetch('/api/floor_data?range=lastweek'),
-        ]);
-        const todayData    = await todayRes.json();
-        const weekData     = await weekRes.json();
-        const lastWeekData = await lastWeekRes.json();
-        drawPie('todayPie',    'todayPieLegend',    todayData);
-        drawPie('weekPie',     'weekPieLegend',     weekData);
-        drawPie('lastWeekPie', 'lastWeekPieLegend', lastWeekData);
-        buildStateChart('todayChart',    todayData,    'Today');
-        buildStateChart('weekChart',     weekData,     'This Week');
-        buildStateChart('lastWeekChart', lastWeekData, 'Last Week');
-    } catch(e) {
-        ['todayChart','weekChart'].forEach(id => {
-            document.getElementById(id).innerHTML =
-                '<p style="color:#8b949e;padding:20px">Chart unavailable.</p>';
-        });
-    }
-})();
-</script>
+<div class="footer">Braider 2 · :5000/floor · Refreshes every 60s · Noble Gas Systems</div>
 </body>
 </html>"""
-
-
-@app.route('/api/floor_data')
-def api_floor_data():
-    import csv as csv_mod
-    from datetime import date, timedelta
-    from flask import request as freq
-    range_param = freq.args.get('range', 'today')
-    today = date.today()
-    if range_param == 'week':
-        # Monday midnight of current week
-        days_since_monday = today.weekday()
-        monday = today - timedelta(days=days_since_monday)
-        cutoff = monday.isoformat()
-        def row_matches(ts): return ts >= cutoff
-    elif range_param == 'lastweek':
-        # Last Monday to last Sunday
-        days_since_monday = today.weekday()
-        this_monday  = today - timedelta(days=days_since_monday)
-        last_monday  = this_monday - timedelta(days=7)
-        last_sunday  = this_monday - timedelta(days=1)
-        cutoff_start = last_monday.isoformat()
-        cutoff_end   = last_sunday.isoformat() + 'T23:59:59'
-        def row_matches(ts): return cutoff_start <= ts <= cutoff_end
-    else:
-        # Today midnight to now
-        today_str = today.isoformat()
-        def row_matches(ts): return ts.startswith(today_str)
-
-    timestamps, table_speed, puller_speed, speed_ratio, states = [], [], [], [], []
-    import glob
-    all_rows = []
-    base = PROCESS_LOG.replace('.csv', '')
-
-    if range_param == 'week':
-        # Current week — check archives from Mon to today
-        from datetime import date as _date, timedelta as _td
-        days_since_mon = _date.today().weekday()
-        for i in range(days_since_mon + 1):
-            d = (_date.today() - _td(days=i)).strftime('%Y%m%d')
-            for archive in glob.glob(base + '_archived_' + d + '*.csv'):
-                try:
-                    with open(archive, newline='', encoding='utf-8', errors='replace') as f:
-                        all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
-                except Exception:
-                    pass
-
-    elif range_param == 'lastweek':
-        # Last week Mon-Sun — scan ALL archives and filter by date range
-        for archive in sorted(glob.glob(base + '_archived_*.csv')):
-            try:
-                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
-                    all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
-            except Exception:
-                pass
-        # Also check live file in case it has last week rows (e.g. no weekend archive)
-    else:
-        # Today — check archives from today only
-        today_compact = date.today().strftime('%Y%m%d')
-        for archive in glob.glob(base + '_archived_' + today_compact + '*.csv'):
-            try:
-                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
-                    all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
-            except Exception:
-                pass
-
-    if os.path.exists(PROCESS_LOG):
-        try:
-            with open(PROCESS_LOG, newline='', encoding='utf-8', errors='replace') as f:
-                all_rows.extend(r for r in csv_mod.DictReader(f) if row_matches(r.get('Timestamp','')))
-        except Exception:
-            pass
-
-    # Sort by timestamp and deduplicate
-    seen_ts = set()
-    deduped = []
-    for r in sorted(all_rows, key=lambda x: x.get('Timestamp','')):
-        ts = r.get('Timestamp','')
-        if ts not in seen_ts:
-            seen_ts.add(ts)
-            deduped.append(r)
-    all_rows = deduped
-
-    # For week view subsample to every 10th row to keep response small
-    step = 10 if range_param == 'week' else 1
-    matching = all_rows[::step]
-    for row in matching:
-        timestamps.append(row.get('Timestamp', ''))
-        try: table_speed.append(float(row.get('Table_Speed', 0) or 0))
-        except: table_speed.append(0)
-        try: puller_speed.append(float(row.get('Puller_Speed', 0) or 0))
-        except: puller_speed.append(0)
-        try: speed_ratio.append(float(row.get('Speed_Ratio') or 0) or None)
-        except: speed_ratio.append(None)
-        states.append(row.get('State_Name', '') or '')
-    return jsonify({'timestamps': timestamps, 'table_speed': table_speed,
-                    'puller_speed': puller_speed, 'speed_ratio': speed_ratio,
-                    'states': states})
 
 
 @app.route('/floor')
 def floor_report():
     d = get_floor_report_data()
-    from flask import render_template_string
-    return render_template_string(FLOOR_HTML, d=d)
+    return render_template_string(FLOOR_HTML, d=type('D', (), d)())
 
-# ── Sleep prevention ─────────────────────────────────────────────────────────
+
+@app.route('/api/floor_data')
+def api_floor_data():
+    import glob
+    from datetime import date, timedelta
+    from flask import request as freq
+    range_param = freq.args.get('range', 'today')
+    today = date.today()
+
+    if range_param == 'week':
+        monday = today - timedelta(days=today.weekday())
+        cutoff = monday.isoformat()
+        def row_matches(ts_): return ts_ >= cutoff
+    elif range_param == 'lastweek':
+        this_monday = today - timedelta(days=today.weekday())
+        last_monday = this_monday - timedelta(days=7)
+        last_sunday = this_monday - timedelta(days=1)
+        cutoff_start = last_monday.isoformat()
+        cutoff_end   = last_sunday.isoformat() + 'T23:59:59'
+        def row_matches(ts_): return cutoff_start <= ts_ <= cutoff_end
+    else:
+        today_str = today.isoformat()
+        def row_matches(ts_): return ts_.startswith(today_str)
+
+    all_rows = []
+    base = PROCESS_LOG.replace('.csv', '')
+
+    if range_param in ('week', 'today'):
+        days_back = today.weekday() if range_param == 'week' else 0
+        for i in range(days_back + 1):
+            d = (today - timedelta(days=i)).strftime('%Y%m%d')
+            for archive in glob.glob(base + '_archived_' + d + '*.csv'):
+                try:
+                    with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                        all_rows.extend(r for r in csv.DictReader(f) if row_matches(r.get('Timestamp','')))
+                except Exception: pass
+    elif range_param == 'lastweek':
+        for archive in sorted(glob.glob(base + '_archived_*.csv')):
+            try:
+                with open(archive, newline='', encoding='utf-8', errors='replace') as f:
+                    all_rows.extend(r for r in csv.DictReader(f) if row_matches(r.get('Timestamp','')))
+            except Exception: pass
+
+    if os.path.exists(PROCESS_LOG):
+        try:
+            with open(PROCESS_LOG, newline='', encoding='utf-8', errors='replace') as f:
+                all_rows.extend(r for r in csv.DictReader(f) if row_matches(r.get('Timestamp','')))
+        except Exception: pass
+
+    seen_ts = set(); deduped = []
+    for r in sorted(all_rows, key=lambda x: x.get('Timestamp','')):
+        t = r.get('Timestamp','')
+        if t not in seen_ts: seen_ts.add(t); deduped.append(r)
+
+    step = 10 if range_param == 'week' else 1
+    matching = deduped[::step]
+    timestamps_, table_speed_, puller_speed_, speed_ratio_, states_ = [], [], [], [], []
+    for row in matching:
+        timestamps_.append(row.get('Timestamp',''))
+        try: table_speed_.append(float(row.get('Table_Speed',0) or 0))
+        except: table_speed_.append(0)
+        try: puller_speed_.append(float(row.get('Puller_Speed',0) or 0))
+        except: puller_speed_.append(0)
+        try: speed_ratio_.append(float(row.get('Speed_Ratio') or 0) or None)
+        except: speed_ratio_.append(None)
+        states_.append(row.get('State_Name','') or '')
+    return jsonify({'timestamps':timestamps_,'table_speed':table_speed_,
+                    'puller_speed':puller_speed_,'speed_ratio':speed_ratio_,'states':states_})
+
+
+# ── Sleep prevention ──────────────────────────────────────────────────────────
 
 def prevent_sleep():
     import platform
     if platform.system() == 'Windows':
         import ctypes
-        ES_CONTINUOUS       = 0x80000000
-        ES_SYSTEM_REQUIRED  = 0x00000001
-        ES_DISPLAY_REQUIRED = 0x00000002
-        ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
-        )
-        log.info('Sleep prevention active — Windows will not sleep while script is running')
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
+        log.info('Sleep prevention active (Windows).')
     else:
-        log.info('Sleep prevention: Linux detected, skipping (Pi stays awake via systemd)')
+        log.info('Linux detected — sleep prevention handled by systemd.')
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     prevent_sleep()
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
-    log.info('Dashboard starting at http://0.0.0.0:5000')
+
+    # Independent archiver — never touches the PLC loop
+    archiver_thread = threading.Thread(target=independent_archiver_loop, daemon=True, name='archiver')
+    archiver_thread.start()
+
+    # PLC monitor loop
+    monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name='monitor')
+    monitor_thread.start()
+
+    log.info('Dashboard: http://0.0.0.0:5000  |  Floor: http://0.0.0.0:5000/floor')
     import logging as _logging
     _logging.getLogger('werkzeug').setLevel(_logging.ERROR)
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
