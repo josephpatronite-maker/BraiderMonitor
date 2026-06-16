@@ -645,9 +645,8 @@ _hires_ring      = deque(maxlen=HIRES_RING_SIZE)   # 20 rows = 10s at 0.5s
 _hires_lock      = threading.Lock()
 
 # Event capture state — set by monitor_loop, consumed by hires_loop
-_hires_event     = threading.Event()   # signals hires_loop to start post-capture
-_hires_event_meta = {}                 # {'type': 'WIRE_BREAK'|'ESTOP', 'timestamp': ...}
-_hires_plc_ref   = None               # shared PLC driver reference for hires reads
+_hires_event      = threading.Event()
+_hires_event_meta = {}
 
 
 # ── Hi-res capture loop ───────────────────────────────────────────────────────
@@ -687,137 +686,124 @@ def flush_hires_event(pre_rows, post_rows, event_type, event_ts):
 
 def hires_loop():
     """
-    Polls HIRES_TAGS at 0.5s into an in-memory ring buffer.
-    Never writes to disk during normal operation.
-    When _hires_event is set by monitor_loop (wire break / e-stop detected),
-    captures POST_EVENT_SECONDS of post-event data then flushes to disk.
-    Runs as an independent daemon thread sharing the PLC connection via _hires_plc_ref.
-    """
-    global _hires_plc_ref
+    Polls HIRES_TAGS at 0.5s into an in-memory ring buffer using its OWN
+    independent LogixDriver connection — never shares a socket with monitor_loop.
 
-    log.info('Hires loop started — waiting for PLC connection.')
+    The CompactLogix supports multiple simultaneous CIP sessions. Two connections
+    is the correct solution; sharing one socket across threads causes CIP
+    request-response interleaving which corrupts both reads.
+
+    Never writes to disk during normal operation.
+    On _hires_event signal: flushes ring buffer (PRE) + captures 5s POST to CSV.
+    """
+    log.info('Hires loop started — establishing own PLC connection.')
+    retry_delay = 5
+
+    def _build_row(d, phase='RING', offset=0.0):
+        ps  = d.get('Puller_Actual_Speed')
+        ts_ = d.get('realTableSpeed')
+        pv  = d.get('servoPuller_Axis.ActualVelocity')
+        cv  = d.get('servoPuller_Axis.CommandVelocity')
+        st  = d.get('Machine_State')
+        return {
+            'Timestamp':           ts(),
+            'Braider_ID':          BRAIDER_ID,
+            'Machine_State':       st,
+            'State_Name':          state_name(st) if st else '',
+            'Wire_Break_Detected': d.get('WIre_Break_Detected'),
+            'Machine_Faults':      d.get('Machine_Faults'),
+            'Wire_Break_Bits':     d.get('Local:1:I.Data'),
+            'IO_Decoded':          decode_io_str(d.get('Local:1:I.Data')),
+            'Puller_Speed':        round(ps, 6)  if ps  else None,
+            'Table_Speed':         round(ts_, 6) if ts_ else None,
+            'Speed_Ratio':         round(ps / ts_, 6) if ps and ts_ and ts_ > 0 else None,
+            'Puller_Pos_Feet':     d.get('Puller_Pos_Feet'),
+            'Puller_ActualVel':    pv,
+            'Puller_CmdVel':       cv,
+            'Puller_VelCmdErr':    round(cv - pv, 6) if cv is not None and pv is not None else None,
+            'Puller_ActualPos':    d.get('servoPuller_Axis.ActualPosition'),
+            'Puller_CmdPos':       d.get('servoPuller_Axis.CommandPosition'),
+            'Table_VelFeedback':   d.get('servoTable_Axis.VelocityFeedback'),
+            'VFD_Freq_Actual':     d.get('Table_Drive:I.OutputFreq'),
+            'VFD_Freq_Command':    d.get('Table_Drive:O.FreqCommand'),
+            'Core_Break':          d.get('Core_Break'),
+            'Estop_Ok':            d.get('I_Emergency_Stop_Ok'),
+            'Fault_WireBreak':     d.get('Program:MainProgram.Fault_WireBreak'),
+            'Fault_EStop':         d.get('Program:MainProgram.Fault_EStop'),
+            'Hires_Phase':         phase,
+            'Hires_Offset_s':      offset,
+        }
 
     while True:
-        plc = _hires_plc_ref
-        if plc is None:
-            time.sleep(0.5)
-            continue
-
         try:
-            results = plc.read(*HIRES_TAGS)
-            d       = {r.tag: r.value for r in results if r.error is None}
+            with LogixDriver(PLC_IP) as hplc:
+                if not hplc.connected:
+                    raise ConnectionError('Hires LogixDriver connected=False')
+                log.info('Hires loop PLC connected (own session).')
+                retry_delay = 5
 
-            machine_state = d.get('Machine_State')
-            puller_speed  = d.get('Puller_Actual_Speed')
-            table_speed   = d.get('realTableSpeed')
-            puller_vel    = d.get('servoPuller_Axis.ActualVelocity')
-            cmd_vel       = d.get('servoPuller_Axis.CommandVelocity')
+                while True:
+                    t_poll = time.perf_counter()
 
-            row = {
-                'Timestamp':          ts(),
-                'Braider_ID':         BRAIDER_ID,
-                'Machine_State':      machine_state,
-                'State_Name':         state_name(machine_state) if machine_state else '',
-                'Wire_Break_Detected':d.get('WIre_Break_Detected'),
-                'Machine_Faults':     d.get('Machine_Faults'),
-                'Wire_Break_Bits':    d.get('Local:1:I.Data'),
-                'IO_Decoded':         decode_io_str(d.get('Local:1:I.Data')),
-                'Puller_Speed':       round(puller_speed, 6) if puller_speed else None,
-                'Table_Speed':        round(table_speed, 6)  if table_speed  else None,
-                'Speed_Ratio':        round(puller_speed / table_speed, 6)
-                                      if puller_speed and table_speed and table_speed > 0
-                                      else None,
-                'Puller_Pos_Feet':    d.get('Puller_Pos_Feet'),
-                'Puller_ActualVel':   puller_vel,
-                'Puller_CmdVel':      cmd_vel,
-                'Puller_VelCmdErr':   round(cmd_vel - puller_vel, 6)
-                                      if cmd_vel is not None and puller_vel is not None
-                                      else None,
-                'Puller_ActualPos':   d.get('servoPuller_Axis.ActualPosition'),
-                'Puller_CmdPos':      d.get('servoPuller_Axis.CommandPosition'),
-                'Table_VelFeedback':  d.get('servoTable_Axis.VelocityFeedback'),
-                'VFD_Freq_Actual':    d.get('Table_Drive:I.OutputFreq'),
-                'VFD_Freq_Command':   d.get('Table_Drive:O.FreqCommand'),
-                'Core_Break':         d.get('Core_Break'),
-                'Estop_Ok':           d.get('I_Emergency_Stop_Ok'),
-                'Fault_WireBreak':    d.get('Program:MainProgram.Fault_WireBreak'),
-                'Fault_EStop':        d.get('Program:MainProgram.Fault_EStop'),
-                'Hires_Phase':        'RING',
-                'Hires_Offset_s':     0.0,
-            }
+                    results = hplc.read(*HIRES_TAGS)
+                    d       = {r.tag: r.value for r in results if r.error is None}
+                    row     = _build_row(d)
 
-            with _hires_lock:
-                _hires_ring.append(row)
+                    with _hires_lock:
+                        _hires_ring.append(row)
 
-            # Check if an event was signalled by monitor_loop
-            if _hires_event.is_set():
-                _hires_event.clear()
-                with _hires_lock:
-                    meta      = dict(_hires_event_meta)
-                    pre_rows  = list(_hires_ring)   # snapshot of ring at moment of event
+                    # Event triggered by monitor_loop?
+                    if _hires_event.is_set():
+                        _hires_event.clear()
+                        with _hires_lock:
+                            meta     = dict(_hires_event_meta)
+                            pre_rows = list(_hires_ring)
 
-                event_type = meta.get('type', 'EVENT')
-                event_ts_  = meta.get('timestamp', ts())
+                        event_type = meta.get('type', 'EVENT')
+                        event_ts_  = meta.get('timestamp', ts())
+                        log.info(
+                            f'Hires capture: {event_type} — '
+                            f'{len(pre_rows)} pre-rows, capturing {POST_EVENT_SECONDS}s post'
+                        )
 
-                log.info(
-                    f'Hires capture: {event_type} — '
-                    f'capturing {POST_EVENT_SECONDS}s post-event at {HIRES_POLL_INTERVAL}s'
-                )
+                        post_rows = []
+                        post_end  = time.time() + POST_EVENT_SECONDS
+                        offset    = 1
+                        while time.time() < post_end:
+                            try:
+                                pr = hplc.read(*HIRES_TAGS)
+                                pd = {r.tag: r.value for r in pr if r.error is None}
+                                post_rows.append(
+                                    _build_row(pd, 'POST', round(offset * HIRES_POLL_INTERVAL, 2))
+                                )
+                                offset += 1
+                            except Exception as e:
+                                log.warning(f'Hires post-capture read error: {e}')
+                            time.sleep(HIRES_POLL_INTERVAL)
 
-                post_rows = []
-                post_end  = time.time() + POST_EVENT_SECONDS
-                while time.time() < post_end:
-                    try:
-                        pr = plc.read(*HIRES_TAGS)
-                        pd = {r.tag: r.value for r in pr if r.error is None}
-                        ps = pd.get('Puller_Actual_Speed')
-                        ts_ = pd.get('realTableSpeed')
-                        pv  = pd.get('servoPuller_Axis.ActualVelocity')
-                        cv  = pd.get('servoPuller_Axis.CommandVelocity')
-                        post_rows.append({
-                            'Timestamp':           ts(),
-                            'Braider_ID':          BRAIDER_ID,
-                            'Machine_State':       pd.get('Machine_State'),
-                            'State_Name':          state_name(pd.get('Machine_State')) if pd.get('Machine_State') else '',
-                            'Wire_Break_Detected': pd.get('WIre_Break_Detected'),
-                            'Machine_Faults':      pd.get('Machine_Faults'),
-                            'Wire_Break_Bits':     pd.get('Local:1:I.Data'),
-                            'IO_Decoded':          decode_io_str(pd.get('Local:1:I.Data')),
-                            'Puller_Speed':        round(ps, 6) if ps else None,
-                            'Table_Speed':         round(ts_, 6) if ts_ else None,
-                            'Speed_Ratio':         round(ps / ts_, 6) if ps and ts_ and ts_ > 0 else None,
-                            'Puller_Pos_Feet':     pd.get('Puller_Pos_Feet'),
-                            'Puller_ActualVel':    pv,
-                            'Puller_CmdVel':       cv,
-                            'Puller_VelCmdErr':    round(cv - pv, 6) if cv is not None and pv is not None else None,
-                            'Puller_ActualPos':    pd.get('servoPuller_Axis.ActualPosition'),
-                            'Puller_CmdPos':       pd.get('servoPuller_Axis.CommandPosition'),
-                            'Table_VelFeedback':   pd.get('servoTable_Axis.VelocityFeedback'),
-                            'VFD_Freq_Actual':     pd.get('Table_Drive:I.OutputFreq'),
-                            'VFD_Freq_Command':    pd.get('Table_Drive:O.FreqCommand'),
-                            'Core_Break':          pd.get('Core_Break'),
-                            'Estop_Ok':            pd.get('I_Emergency_Stop_Ok'),
-                            'Fault_WireBreak':     pd.get('Program:MainProgram.Fault_WireBreak'),
-                            'Fault_EStop':         pd.get('Program:MainProgram.Fault_EStop'),
-                            'Hires_Phase':         'POST',
-                            'Hires_Offset_s':      0.0,
-                        })
-                    except Exception as e:
-                        log.warning(f'Hires post-capture read error: {e}')
-                    time.sleep(HIRES_POLL_INTERVAL)
+                        # Tag pre-rows with correct negative offsets
+                        n = len(pre_rows)
+                        for i, r in enumerate(pre_rows):
+                            r['Hires_Phase']    = 'PRE'
+                            r['Hires_Offset_s'] = round((i - n) * HIRES_POLL_INTERVAL, 2)
 
-                flush_hires_event(pre_rows, post_rows, event_type, event_ts_)
+                        flush_hires_event(pre_rows, post_rows, event_type, event_ts_)
+
+                    # Sleep only remaining time in the 0.5s budget
+                    elapsed = time.perf_counter() - t_poll
+                    remaining = HIRES_POLL_INTERVAL - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
 
         except Exception as e:
-            log.debug(f'Hires poll error (PLC may be reconnecting): {e}')
-
-        time.sleep(HIRES_POLL_INTERVAL)
+            log.warning(f'Hires loop connection error: {e} — retrying in {retry_delay}s')
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 
 
 # ── Monitor loop ──────────────────────────────────────────────────────────────
 
 def monitor_loop():
-    global _hires_plc_ref
 
     prev_state     = None
     prev_wire_bits = None
@@ -839,7 +825,6 @@ def monitor_loop():
 
                 log.info('PLC connected.')
                 monitor_loop._retry_count = 0
-                _hires_plc_ref = plc          # share driver with hires_loop
                 with _lock:
                     _latest['connected']   = True
                     _latest['last_error']  = None
@@ -1230,7 +1215,6 @@ def monitor_loop():
             log.info('Shutdown requested.')
             break
         except Exception as e:
-            _hires_plc_ref = None   # signal hires_loop to pause
             with _lock:
                 _latest['connected']  = False
                 _latest['last_error'] = str(e)
