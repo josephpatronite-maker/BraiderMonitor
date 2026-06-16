@@ -596,8 +596,10 @@ _latest = {
     'table_current_dist':     None,
     'fault_wire_break':       None,
     'fault_estop':            None,
+    'fault_guard_door':       None,
     'fault_puller_servo':     None,
     'fault_table_servo':      None,
+    'wire_break_detected':    None,
     'recover_step':           None,
     'puller_servo_ok':        None,
     'table_servo_ok':         None,
@@ -1087,7 +1089,7 @@ def monitor_loop():
                     wire_break_detected = d.get('WIre_Break_Detected')
                     prev_wb_detected    = prev_change.get('WIre_Break_Detected')
 
-                    if (machine_state == 16 and not in_startup and
+                    if ((machine_state == 16 or prev_state == 16) and not in_startup and
                             wire_break_detected and not prev_wb_detected):
                         io_context = decode_io_str(wire_bits)
                         log.warning(
@@ -1192,8 +1194,10 @@ def monitor_loop():
                             'estop_recover':       d.get('EStop_Recover'),
                             'fault_wire_break':    d.get('Program:MainProgram.Fault_WireBreak'),
                             'fault_estop':         d.get('Program:MainProgram.Fault_EStop'),
+                            'fault_guard_door':    d.get('Program:MainProgram.Fault_GuardDoor'),
                             'fault_puller_servo':  d.get('Program:MainProgram.Fault_PullerServo'),
                             'fault_table_servo':   d.get('Program:MainProgram.Fault_TableServo'),
+                            'wire_break_detected': d.get('WIre_Break_Detected'),
                             'recover_step':        d.get('Program:MainProgram.Recover_Step'),
                             'puller_current_dist': d.get('Program:MainProgram.Puller_Current_Dist'),
                             'table_current_dist':  d.get('Program:MainProgram.Table_Current_Dist'),
@@ -1354,8 +1358,12 @@ DASHBOARD_HTML = """
 
         <div class="card">
             <div class="label">Table Speed</div>
-            <div class="value" id="table-value">{{ d.table_speed or '—' }}</div>
-            <div class="unit">rev/s (filtered) &nbsp;|&nbsp; <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm</div>
+            <div class="value" id="table-value">{{ d.vfd_freq_actual or '—' }}</div>
+            <div class="unit">
+                VFD Hz×10 &nbsp;|&nbsp;
+                <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm &nbsp;|&nbsp;
+                <span id="table-revs-value" style="color:#888">—</span> rev/s (filtered)
+            </div>
         </div>
 
         <div class="card">
@@ -1426,7 +1434,7 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Faults</div>
+            <div class="label">Machine Faults</div>
             <div id="fault-div" class="value {% if d.no_faults %}ok{% else %}fault blink{% endif %}">
                 {% if d.no_faults %}NONE{% else %}FAULT{% endif %}
             </div>
@@ -1436,47 +1444,32 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Safety</div>
-            <div class="checks">
+            <div class="label">Safety Inputs</div>
+            <div class="checks" style="font-size:13px;">
                 <span id="safety-estop" class="{{ 'ok' if d.estop_ok else 'fault blink' }}">
-                    {{ '✓' if d.estop_ok else '✗' }} E-Stop
+                    {{ '✓' if d.estop_ok else '✗' }} E-Stop OK
                 </span><br>
                 <span id="safety-door" class="{{ 'ok' if d.door_ok else 'warn' }}">
-                    {{ '✓' if d.door_ok else '✗' }} Door
+                    {{ '✓' if d.door_ok else '✗' }} Door Closed
                 </span><br>
                 <span id="safety-guards" class="{{ 'ok' if d.guards_ok else 'fault' }}">
-                    {{ '✓' if d.guards_ok else '✗' }} Guards
+                    {{ '✓' if d.guards_ok else '✗' }} Guards OK
                 </span><br>
                 <span id="safety-motor" class="{{ 'fault blink' if d.i_table_motor_ol else 'ok' }}">
-                    {{ '✗ MOTOR OL' if d.i_table_motor_ol else '✓ Motor OK' }}
-                </span><br>
-                <span id="safety-triaxial" class="{{ 'fault blink' if d.i_triaxial_wb else 'ok' }}">
-                    {{ '✗ TRIAXIAL WB' if d.i_triaxial_wb else '✓ Triaxial OK' }}
+                    {{ '✗ Motor OL' if d.i_table_motor_ol else '✓ Motor OK' }}
                 </span><br>
                 <span id="safety-core" class="{{ 'fault blink' if d.core_break else 'ok' }}">
-                    {{ '✗ CORE BREAK' if d.core_break else '✓ Core OK' }}
+                    {{ '✗ Core Break' if d.core_break else '✓ Core OK' }}
                 </span>
             </div>
         </div>
 
         <div class="card">
-            <div class="label">Servo Axis Sync</div>
-            <div class="axes">
-                {% for i, synced in [
-                    (1, d.axis1_synced), (2, d.axis2_synced), (3, d.axis3_synced),
-                    (4, d.axis4_synced), (5, d.axis5_synced)
-                ] %}
-                <span class="axis {{ 'axis-ok' if synced else 'axis-warn' }}">OS{{ i }}</span>
-                {% endfor %}
-            </div>
-            <div class="unit" style="margin-top:8px">all green = normal</div>
-        </div>
-
-        <div class="card">
-            <div class="label">Individual Faults</div>
-            <div class="checks" style="font-size:11px;">
+            <div class="label">Program Faults</div>
+            <div class="checks" style="font-size:13px;">
                 <span id="fault-wb"     class="{{ 'fault blink' if d.fault_wire_break else 'ok' }}">{{ '✗ Wire Break' if d.fault_wire_break else '✓ Wire Break' }}</span><br>
                 <span id="fault-es"     class="{{ 'fault blink' if d.fault_estop else 'ok' }}">{{ '✗ E-Stop' if d.fault_estop else '✓ E-Stop' }}</span><br>
+                <span id="fault-guard"  class="{{ 'fault blink' if d.fault_guard_door else 'ok' }}">{{ '✗ Guard Door' if d.fault_guard_door else '✓ Guard Door' }}</span><br>
                 <span id="fault-puller" class="{{ 'fault blink' if d.fault_puller_servo else 'ok' }}">{{ '✗ Puller Servo' if d.fault_puller_servo else '✓ Puller Servo' }}</span><br>
                 <span id="fault-table"  class="{{ 'fault blink' if d.fault_table_servo else 'ok' }}">{{ '✗ Table Servo' if d.fault_table_servo else '✓ Table Servo' }}</span>
             </div>
@@ -1487,7 +1480,8 @@ DASHBOARD_HTML = """
             <div class="value" style="font-size:26px">
                 <span id="recover-step">{{ d.recover_step or '—' }}</span>
             </div>
-            <div class="unit">wire break recovery progress</div>
+            <div class="unit" style="margin-top:4px;">Sequence step: <span id="sequence-step" style="color:#4fc3f7">{{ d.sequence_step or '—' }}</span></div>
+            <div class="unit" style="margin-top:2px;">Wire break: <span id="wb-detected" class="{{ 'fault' if d.wire_break_detected else 'ok' }}" style="font-weight:bold;">{{ 'DETECTED' if d.wire_break_detected else 'clear' }}</span></div>
         </div>
 
     </div>
@@ -1502,7 +1496,7 @@ DASHBOARD_HTML = """
         &nbsp;|&nbsp; Logs: {{ log_dir }}
         &nbsp;|&nbsp; {{ braider_id }}
         &nbsp;|&nbsp; <span id="last-update" style="color:#555"></span>
-        &nbsp;|&nbsp; <button id="detail-btn" onclick="toggleDetail()" style="background:none;border:1px solid #444;color:#888;cursor:pointer;padding:2px 8px;border-radius:4px;font-size:11px;">🔍 Show Detail</button>
+        &nbsp;|&nbsp; <button id="sound-btn" onclick="toggleSound()" style="background:none;border:1px solid #444;color:#888;cursor:pointer;padding:2px 8px;border-radius:4px;font-size:11px;">🔇 Sound OFF</button>
     </div>
 
 <script>
@@ -1583,7 +1577,7 @@ function drawChart() {
     }
     const [tMn,tMx]=getRange(tableSpeedArr);
     drawBackground(0); drawLine(0,tableSpeedArr,'#4fc3f7',tMn,tMx);
-    labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rev/s)','#4fc3f7');
+    labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rpm)','#4fc3f7');
     const [pMn,pMx]=getRange(pullerSpeedArr);
     drawBackground(1); drawLine(1,pullerSpeedArr,'#81c784',pMn,pMx);
     labelY(1,pMn,pMx,'#81c784'); labelPanel(1,'Puller Speed (in/s)','#81c784');
@@ -1598,7 +1592,57 @@ function drawChart() {
     if (timestampsArr[mid]) canvasCtx.fillText(timestampsArr[mid],PAD.left+plotW/2,xBottom);
 }
 
-// ── Helper functions (declared outside fetchAndUpdate) ────────────────────────
+// ── Sound system — default OFF ────────────────────────────────────────────────
+let soundEnabled = false;
+let audioCtx = null;
+
+function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+}
+
+function beep(freq, duration, volume, type) {
+    if (!soundEnabled) return;
+    try {
+        const ctx = getAudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = type || 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(volume || 0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + duration);
+    } catch(e) {}
+}
+
+// State change sounds — different tone per transition
+function playStateChangeSound(fromState, toState) {
+    if (toState === 16) {
+        beep(660, 0.12, 0.25, 'sine');  // RUNNING — high pleasant
+        setTimeout(() => beep(880, 0.08, 0.2, 'sine'), 100);
+    } else if (toState === 512 || toState === 256) {
+        beep(220, 0.3, 0.4, 'square'); // ABORTED/ABORTING — low alarm
+        setTimeout(() => beep(180, 0.3, 0.4, 'square'), 250);
+    } else if (toState === 4 || toState === 32) {
+        beep(440, 0.15, 0.25, 'triangle'); // STOPPED/STOPPING — mid neutral
+    } else if (toState === 1) {
+        beep(330, 0.1, 0.2, 'sine'); // OFF — soft low
+    }
+}
+
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    const btn = document.getElementById('sound-btn');
+    if (btn) btn.textContent = soundEnabled ? '🔊 Sound ON' : '🔇 Sound OFF';
+    if (soundEnabled) {
+        getAudioCtx().resume();
+        beep(440, 0.05, 0.1, 'sine'); // confirmation beep
+    }
+}
+
+
 function setSafety(id, ok, okText, faultText, faultClass, isStale) {
     const el = document.getElementById(id); if (!el) return;
     el.textContent = (ok && !isStale) ? '✓ ' + okText : '✗ ' + (isStale ? 'DATA STALE' : faultText);
@@ -1680,18 +1724,8 @@ function updatePie(pcts) {
     }
 }
 
-// ── Detail toggle ─────────────────────────────────────────────────────────────
-let detailVisible = false;
-function toggleDetail() {
-    detailVisible = !detailVisible;
-    const sections = document.querySelectorAll('.detail-section');
-    sections.forEach(s => s.style.display = detailVisible ? '' : 'none');
-    const btn = document.getElementById('detail-btn');
-    if (btn) btn.textContent = detailVisible ? '🔍 Hide Detail' : '🔍 Show Detail';
-}
-
 // ── Main fetch loop ───────────────────────────────────────────────────────────
-let lastSeenTimestamp = '', timestampAgeTicks = 0;
+let lastSeenTimestamp = '', timestampAgeTicks = 0, lastMachineState = null;
 
 async function fetchAndUpdate() {
     try {
@@ -1712,8 +1746,8 @@ async function fetchAndUpdate() {
             if (timestampAgeTicks >= 5 || !data.connected) isStale = true;
         } else { isStale = true; }
 
-        // Rolling arrays
-        tableSpeedArr.shift();   tableSpeedArr.push(isStale ? null : ts);
+        // Rolling arrays — table speed converted to RPM for chart
+        tableSpeedArr.shift();   tableSpeedArr.push(isStale ? null : (ts ? ts * 60 : 0));
         pullerSpeedArr.shift();  pullerSpeedArr.push(isStale ? null : ps);
         speedRatioArr.shift();   speedRatioArr.push(isStale ? null : sr);
         timestampsArr.shift();   timestampsArr.push(now);
@@ -1736,8 +1770,16 @@ async function fetchAndUpdate() {
 
         // Production / process cards
         upd('feet-value',      data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
-        upd('table-value',     ts ? ts.toFixed(4) : '—');
-        upd('table-rpm-value', ts ? (ts*60).toFixed(1) : '—');
+        // Table speed card — VFD as primary, RPM from realTableSpeed, raw rev/s secondary
+        const vfdRaw = data.vfd_freq_actual;
+        const tableRevs = data.table_speed;
+        const tableRpm = tableRevs ? (tableRevs * 60).toFixed(1) : null;
+        const tableEl = document.getElementById('table-value');
+        if (tableEl) tableEl.textContent = isStale ? '—' : (vfdRaw != null ? vfdRaw : '—');
+        const rpmEl = document.getElementById('table-rpm-value');
+        if (rpmEl) rpmEl.textContent = (!isStale && tableRpm) ? tableRpm : '—';
+        const revsEl = document.getElementById('table-revs-value');
+        if (revsEl) revsEl.textContent = (!isStale && tableRevs) ? tableRevs.toFixed(4) : '—';
         upd('puller-value',    ps ? ps.toFixed(4) : '—');
         upd('ratio-value',     sr ? sr.toFixed(5) : '—');
         upd('recover-step',    data.recover_step  != null ? data.recover_step  : '—');
@@ -1753,7 +1795,7 @@ async function fetchAndUpdate() {
         const vfdRef = document.getElementById('vfd-at-ref');
         if (vfdRef) vfdRef.innerHTML = (!isStale && data.vfd_at_ref) ? '&nbsp;<span class="ok">AT REF</span>' : '';
 
-        // State card
+        // State card + sound on change
         const stateEl  = document.getElementById('state-value');
         const stateDiv = document.getElementById('state-div');
         if (stateEl) stateEl.textContent = isStale ? 'UNKNOWN (DISCONNECTED)' : (data.state_name || '—');
@@ -1761,6 +1803,10 @@ async function fetchAndUpdate() {
             isStale ? 'stopped' : st===16 ? 'running' :
             (st===256||st===512) ? 'fault blink' : (st===64||st===128) ? 'paused' : 'stopped'
         );
+        if (!isStale && st !== lastMachineState && lastMachineState !== null) {
+            playStateChangeSound(lastMachineState, st);
+        }
+        lastMachineState = isStale ? lastMachineState : st;
 
         // Elapsed time
         const elapsedEl = document.getElementById('elapsed-value');
@@ -1781,7 +1827,7 @@ async function fetchAndUpdate() {
             wbDiv.className = 'value ' + (abnormal ? 'warn' : 'ok');
         }
 
-        // Faults card
+        // Machine Faults card
         const faultDiv  = document.getElementById('fault-div');
         const faultUnit = document.getElementById('fault-unit');
         if (faultDiv) {
@@ -1792,27 +1838,27 @@ async function fetchAndUpdate() {
         if (faultUnit) faultUnit.textContent = (!isStale && data.machine_faults && data.machine_faults !== 4)
             ? 'code: ' + data.machine_faults : '';
 
-        // Safety
-        setSafety('safety-estop',    data.estop_ok,           'E-Stop',    'E-STOP PRESSED', 'fault blink', isStale);
-        setSafety('safety-door',     data.door_ok,            'Door',      'Door Open',      'warn',        isStale);
-        setSafety('safety-guards',   data.guards_ok,          'Guards',    'Guards Open',    'fault',       isStale);
-        setSafety('safety-motor',    !data.i_table_motor_ol,  'Motor OK',  'MOTOR OL',       'fault blink', isStale);
-        setSafety('safety-triaxial', !data.i_triaxial_wb,     'Triaxial OK','TRIAXIAL WB',   'fault blink', isStale);
-        setSafety('safety-core',     !data.core_break,        'Core OK',   'CORE BREAK',     'fault blink', isStale);
+        // Safety inputs
+        setSafety('safety-estop',  data.estop_ok,          'E-Stop OK',  'E-STOP PRESSED', 'fault blink', isStale);
+        setSafety('safety-door',   data.door_ok,           'Door Closed','Door Open',       'warn',        isStale);
+        setSafety('safety-guards', data.guards_ok,         'Guards OK',  'Guards Open',     'fault',       isStale);
+        setSafety('safety-motor',  !data.i_table_motor_ol, 'Motor OK',   'MOTOR OL',        'fault blink', isStale);
+        setSafety('safety-core',   !data.core_break,       'Core OK',    'CORE BREAK',      'fault blink', isStale);
 
-        // Individual faults
+        // Program Faults
         setFault('fault-wb',     data.fault_wire_break,   'Wire Break',   'Wire Break');
         setFault('fault-es',     data.fault_estop,        'E-Stop',       'E-Stop');
+        setFault('fault-guard',  data.fault_guard_door,   'Guard Door',   'Guard Door');
         setFault('fault-puller', data.fault_puller_servo, 'Puller Servo', 'Puller Servo');
         setFault('fault-table',  data.fault_table_servo,  'Table Servo',  'Table Servo');
 
-        // Axis sync
-        for (let i=1; i<=5; i++) {
-            const el = document.getElementById('axis'+i+'-sync');
-            if (el) {
-                const ok = data['axis'+i+'_synced'];
-                el.className = 'axis ' + (ok ? 'axis-ok' : 'axis-warn');
-            }
+        // Recovery card
+        upd('recover-step',   data.recover_step   != null ? data.recover_step   : '—');
+        upd('sequence-step',  data.sequence_step  != null ? data.sequence_step  : '—');
+        const wbDetEl = document.getElementById('wb-detected');
+        if (wbDetEl && !isStale) {
+            wbDetEl.textContent = data.wire_break_detected ? 'DETECTED' : 'clear';
+            wbDetEl.className   = data.wire_break_detected ? 'fault' : 'ok';
         }
 
         // Daily utilization pie
