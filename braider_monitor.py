@@ -124,32 +124,22 @@ FAST_TAGS = [
     'Machine_State',
     'Puller_Actual_Speed',
     'Puller_Pos_Feet',
-    'realTableSpeed',                           # filtered table rev/s (YES / process_log)
+    'realTableSpeed',
     'Table_Position',
     'Active_Segment',
     # Wire break detection
-    'Local:1:I.Data',                           # 16-bit wire break bitmask
-    'Local:1:I.Fault',                          # I/O module fault flag
-    'WIre_Break_Detected',                      # PLC-level break flag (typo is intentional)
+    'Local:1:I.Data',
+    'Local:1:I.Fault',
+    'WIre_Break_Detected',
     'Core_Break',
-    # Safety inputs
+    # Safety inputs (contextual — stay in process_log as state columns)
     'I_Door_Interlock_Ok',
     'I_Emergency_Stop_Ok',
-    'I_Table_Motor_OL',
-    'I_CoreBreak_Sensor',
-    'I_Triaxial_WB',
-    'Machine.Estops_Ok',
     'Machine.Guards_Ok',
     'Machine.All_Safties_Ok',
     'Machine.All_Axes_Ok',
     'Machine.All_Axes_Running',
-    # Servo sync
-    'AxisSynced_OS1',
-    'AxisSynced_OS2',
-    'AxisSynced_OS3',
-    'AxisSynced_OS4',
-    'AxisSynced_OS5',
-    # State elapsed time components
+    # State elapsed time
     'Current_Hours.ACC',
     'Current_Minutes.ACC',
     'Current_Seconds.ACC',
@@ -169,10 +159,17 @@ FAST_TAGS = [
     'No_Machine_Faults',
     'No_Machine_Msgs',
     'Machine_Faults',
-    # Wire break recovery
+    # Wire break recovery & events
     'WireBreak_Move',
     'EStop_Recover',
-    # Program-scoped — segment progress & recovery (always polled, log in process_log)
+    'New_Part_Latch',
+    'New_Part_ONS',
+    'PPI_Change_ONS',
+    'Puller_Position_Error',
+    # Sequence / state machine
+    'Sequence_Step',
+    'PullerMasterAxis',
+    # Program-scoped
     'Program:MainProgram.Fault_WireBreak',
     'Program:MainProgram.Fault_EStop',
     'Program:MainProgram.Fault_GuardDoor',
@@ -182,13 +179,13 @@ FAST_TAGS = [
     'Program:MainProgram.Puller_Current_Dist',
     'Program:MainProgram.Table_Current_Dist',
     'Program:P01_TableDrive.Servo_Axis_Faults',
-    # Servo axis sub-tags for process log & wire break pre-detection research
+    # Servo axis sub-tags
     'servoPuller_Axis.ActualPosition',
     'servoPuller_Axis.CommandPosition',
     'servoPuller_Axis.ActualVelocity',
     'servoPuller_Axis.CommandVelocity',
     'servoPuller_Axis.MotionStatus',
-    'servoTable_Axis.VelocityFeedback',         # raw encoder — wire break pre-detection
+    'servoTable_Axis.VelocityFeedback',
 ]
 
 # OEE_TAGS — 60s poll written to oee_log.csv
@@ -205,7 +202,7 @@ OEE_TAGS = [
     'PowerOn_Hours.ACC',
     'Triaxial_Enable',
     'Active_Segment',
-    # Recipe params (slow-changing)
+    # Recipe params
     'Discrete_Distance',
     'Discrete_Loops',
     'Loop_Length_Feet',
@@ -215,38 +212,84 @@ OEE_TAGS = [
     'Hi_PPI',
     'Hi_PPI_Running',
     'Base_Ratio',
+    # Fault flags — read at OEE cadence for CHANGE_TAGS RBE detection
+    'Fault_9',
+    'Fault_13',
+    'Fault_Cam',
+    'Fault_Calc',
+    'Table_Homing_Error',
+    'Calc_Error',
+    'Cam_Error',
+    # Rarely-changing inputs read at OEE cadence
+    'I_Table_Motor_OL',
+    'I_CoreBreak_Sensor',
+    'I_Triaxial_WB',
+    'AxisSynced_OS1',
+    'AxisSynced_OS2',
+    'AxisSynced_OS3',
+    'AxisSynced_OS4',
+    'AxisSynced_OS5',
+    'PullerMasterAxis',
 ]
 
 # CHANGE_TAGS — RBE tags written to event_log only on 0→1 or 1→0 transition.
 # These are the 11 tags previously being polled every 2s into event_log.
 # All are BOOLs unless otherwise noted.
 CHANGE_TAGS = [
+    # Wire break & core break
+    'WIre_Break_Detected',
+    'Core_Break',
+    'WireBreak_Move',
+    # Faults
     'Fault_9',
     'Fault_13',
     'Fault_Cam',
     'Fault_Calc',
-    'Core_Break',
-    'EStop_Recover',
+    'Calc_Error',
+    'Cam_Error',
+    'Table_Homing_Error',
+    'Puller_Position_Error',
+    'Table_Drive:I.Faulted',
+    # Machine_Faults DINT — logs on any value change
+    'Machine_Faults',
+    # Safety inputs (rarely changing — event_log only)
     'I_Table_Motor_OL',
     'I_Door_Interlock_Ok',
     'I_Emergency_Stop_Ok',
     'I_CoreBreak_Sensor',
     'I_Triaxial_WB',
-    'Table_Drive:I.Faulted',
+    # Servo sync
     'AxisSynced_OS1',
     'AxisSynced_OS2',
     'AxisSynced_OS3',
     'AxisSynced_OS4',
     'AxisSynced_OS5',
-    'WIre_Break_Detected',
-    'Puller_Position_Error',
-    'New_Part_Latch',
+    # Run lifecycle
     'Run_Complete',
+    'New_Part_Latch',
+    'New_Part_ONS',
+    'EStop_Recover',
     'Transition_Active',
+    'Sequence_Step',
+    'PullerMasterAxis',
+    # Sensor & PPI
     'PPI_Change_ONS',
     'Sensor_Mode_Enable',
-    # Machine_Faults is a DINT — compare on any non-zero value change
-    'Machine_Faults',
+    # Recipe config — log when operator changes recipe mid-shift
+    'HMI_NumberCarriers',
+    'HMI_Recipe_Number',
+    'Recipe_Modified',
+    'Triaxial_Enable',
+    'Carrier_Mode',
+    'Discrete_Distance',
+    'Discrete_Loops',
+    'Loop_Length_Feet',
+    'Base_Ratio',
+    'Current_Ratio',
+    'Low_PPI',
+    'Hi_PPI',
+    # Messages
+    'No_Machine_Msgs',
 ]
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -601,6 +644,8 @@ def monitor_loop():
                     _latest['connected']   = True
                     _latest['last_error']  = None
 
+                od = {}  # last OEE poll result — persists between fast polls
+
                 while True:
                     now       = time.time()
                     timestamp = ts()
@@ -678,6 +723,7 @@ def monitor_loop():
                             'Braider_ID':         BRAIDER_ID,
                             'Machine_State':      machine_state,
                             'State_Name':         state_name(machine_state) if machine_state else '',
+                            'Active_Segment':     od.get('Active_Segment'),
                             'Recipe_Name':        recipe_name,
                             'Recipe_Number':      od.get('HMI_Recipe_Number'),
                             'Recipe_PPI':         recipe_ppi,
@@ -720,24 +766,24 @@ def monitor_loop():
                         'No_Faults':             no_faults,
                         'No_Msgs':               d.get('No_Machine_Msgs'),
                         'Machine_Faults':        d.get('Machine_Faults'),
+                        # Wire break
                         'Wire_Break_Bits':       wire_bits,
                         'IO_Decoded':            decode_io_str(wire_bits),
                         'Wire_Input_Fault':      d.get('Local:1:I.Fault'),
                         'Wire_Break_Detected':   d.get('WIre_Break_Detected'),
                         'Core_Break':            d.get('Core_Break'),
+                        'WireBreak_Move':        d.get('WireBreak_Move'),
+                        # Safety context (state columns — useful every 2s for ML)
                         'Door_Ok':               d.get('I_Door_Interlock_Ok'),
                         'Estop_Ok':              d.get('I_Emergency_Stop_Ok'),
                         'Guards_Ok':             d.get('Machine.Guards_Ok'),
                         'All_Safties_Ok':        d.get('Machine.All_Safties_Ok'),
                         'All_Axes_Ok':           d.get('Machine.All_Axes_Ok'),
                         'All_Axes_Running':      d.get('Machine.All_Axes_Running'),
-                        'AxisSynced_1':          d.get('AxisSynced_OS1'),
-                        'AxisSynced_2':          d.get('AxisSynced_OS2'),
-                        'AxisSynced_3':          d.get('AxisSynced_OS3'),
-                        'AxisSynced_4':          d.get('AxisSynced_OS4'),
-                        'AxisSynced_5':          d.get('AxisSynced_OS5'),
+                        # Recipe context
                         'Recipe_Name':           recipe_name,
                         'Recipe_PPI':            recipe_ppi,
+                        # VFD
                         'VFD_Freq_Actual':       d.get('Table_Drive:I.OutputFreq'),
                         'VFD_Freq_Command':      d.get('Table_Drive:O.FreqCommand'),
                         'VFD_Freq_Delta':        (
@@ -747,16 +793,19 @@ def monitor_loop():
                         'VFD_Faulted':           d.get('Table_Drive:I.Faulted'),
                         'VFD_Active':            d.get('Table_Drive:I.Active'),
                         'VFD_AtReference':       d.get('Table_Drive:I.AtReference'),
+                        # Run state
                         'Transition_Active':     d.get('Transition_Active'),
                         'Taper_Sensor':          d.get('Taper_Sensor_Input'),
                         'Sensor_Mode':           d.get('Sensor_Mode_Enable'),
                         'Length_To_Run':         d.get('Length_To_Run'),
                         'Run_Complete':          d.get('Run_Complete'),
-                        'WireBreak_Move':        d.get('WireBreak_Move'),
                         'EStop_Recover':         d.get('EStop_Recover'),
-                        'I_Table_Motor_OL':      d.get('I_Table_Motor_OL'),
-                        'I_CoreBreak_Sensor':    d.get('I_CoreBreak_Sensor'),
-                        'I_Triaxial_WB':         d.get('I_Triaxial_WB'),
+                        'Sequence_Step':         d.get('Sequence_Step'),
+                        'PullerMasterAxis':      d.get('PullerMasterAxis'),
+                        'New_Part_Latch':        d.get('New_Part_Latch'),
+                        'New_Part_ONS':          d.get('New_Part_ONS'),
+                        'PPI_Change_ONS':        d.get('PPI_Change_ONS'),
+                        'Puller_Position_Error': d.get('Puller_Position_Error'),
                         # Program-scoped
                         'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
                         'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
@@ -807,19 +856,22 @@ def monitor_loop():
                     prev_state = machine_state
 
                     # ── RBE CHANGE_TAGS → event_log ──────────────────────────
-                    # One row written only when a tag transitions (0→1 or 1→0 for BOOLs;
-                    # any value change for DINT/REAL).
+                    # Tags may come from fast poll (d) or OEE poll (od).
+                    # od is initialized to {} and updated every 60s — safe to merge always.
+                    # Guards: skip -32767/-32000 (pycomm3 I/O fault), skip None.
+                    _combined = {**od, **d}  # fast poll (d) takes precedence over OEE (od)
+
                     for tag in CHANGE_TAGS:
-                        current_val = d.get(tag)
+                        current_val = _combined.get(tag)
                         if current_val is None:
                             continue
+                        if isinstance(current_val, int) and current_val in (-32767, -32768, -32000):
+                            continue  # pycomm3 I/O fault — ignore
                         last_val = prev_change.get(tag)
                         if last_val is None:
-                            # First poll after (re)connect — seed without logging
                             prev_change[tag] = current_val
                             continue
                         if current_val != last_val:
-                            # Determine transition label for BOOLs
                             if isinstance(current_val, bool) or current_val in (0, 1):
                                 transition = 'TRIGGERED' if current_val else 'CLEARED'
                             else:
