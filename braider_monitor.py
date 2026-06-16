@@ -65,42 +65,53 @@ STATE_CODES = {
     512: 'ABORTED',
 }
 
-# ── Wire break bobbin / carrier mapping ───────────────────────────────────────
-# Local:1:I.Data is a 16-bit integer.  Bit 0 and 1 are the two triaxial inputs
-# (normal state = 1, break = 0).  Bits 2–15 map to the 48-carrier bobbin ring.
-# Three bits (groups of 3) correspond to one physical carrier position.
-# Adjust the mapping below to match your physical wiring sheet once confirmed.
+# ── Local:1:I.Data bit mapping ────────────────────────────────────────────────
+# Source: HS120/48-2021-IMC-7K-NOBLE GAS electrical schematic, sheet 08 (PLC-DI 1.0-11)
+# Local:1:I.Data is a packed 12-bit integer representing all embedded PLC digital inputs.
+# Each bit maps to a specific physical input terminal on the 1769-L18ERM-BB1B controller.
 #
-# The bitmask read from the PLC: normal = 3 (bits 0–1 high, everything else 0).
-# A break means a bit that was HIGH goes LOW (active-low switches).
-# prev_wire_bits ^ wire_bits  → which bits changed
-# prev_wire_bits & changed    → which bits went from 1 → 0 (new break)
-# wire_bits & changed         → which bits went from 0 → 1 (cleared)
+# Normal running value = 3 (binary 011) = EStop_OK + Door_Closed
+# Normal stopped/off   = 1 (binary 001) = EStop_OK only
 #
-# Bit-to-carrier lookup (populate from wiring schematic):
-WIRE_BIT_TO_CARRIER = {
-    # bit_index : "Carrier_XX"
-    # 0 and 1 are the triaxial / control inputs — not bobbin wires
-    0:  'Triaxial_A',
-    1:  'Triaxial_B',
-    2:  'Carrier_01',
-    3:  'Carrier_02',
-    4:  'Carrier_03',
-    5:  'Carrier_04',
-    6:  'Carrier_05',
-    7:  'Carrier_06',
-    8:  'Carrier_07',
-    9:  'Carrier_08',
-    10: 'Carrier_09',
-    11: 'Carrier_10',
-    12: 'Carrier_11',
-    13: 'Carrier_12',
-    14: 'Carrier_13',
-    15: 'Carrier_14',
-    # extend to 47 when wiring sheet is confirmed
+# Wire break is NOT detected via this tag — use WIre_Break_Detected or Machine_Faults.
+# Bit 10 (WireBreak_SW) reflects the WB1-WB4 series circuit on net 215 but the
+# machine aborts too fast to catch it reliably at 2s polling.
+#
+# This tag is collected in process_log as a composite operator input snapshot.
+# Decode with decode_io_bits() / decode_io_str() for human-readable active inputs.
+
+IO_BIT_LABELS = {
+    0:  'EStop_OK',          # I:1.1/00 — High = all E-stops released
+    1:  'Door_Closed',       # I:1.1/01 — High = door interlock satisfied (DI3)
+    2:  'Puller_SSW_Close',  # I:1.1/02 — Puller selector switch: close position
+    3:  'Puller_SSW_Open',   # I:1.1/03 — Puller selector switch: open position
+    4:  'Start_PB',          # I:1.1/04 — Start pushbutton pressed
+    5:  'Stop_PB',           # I:1.1/05 — Stop pushbutton pressed
+    6:  'Jog_Fwd',           # I:1.1/06 — Jog forward button pressed
+    7:  'TakeUp_OL',         # I:1.1/07 — Take-up motor overload relay tripped
+    8:  'Upper_Prox',        # I:1.1/08 — Upper proximity sensor active
+    9:  'Lower_Prox',        # I:1.1/09 — Lower proximity sensor active
+    10: 'WireBreak_SW',      # I:1.1/10 — WB1-WB4 series circuit on net 215
+    11: 'Triaxial_SW',       # I:1.1/11 — Triaxial wire break microswitch
 }
 
-NORMAL_WIRE_BITS = 3  # both triaxial inputs high, no wire breaks
+IO_NORMAL_RUNNING = 3   # EStop_OK + Door_Closed
+IO_NORMAL_STOPPED = 1   # EStop_OK only
+
+
+def decode_io_bits(value):
+    """Return list of active input label strings for a Local:1:I.Data integer value."""
+    if value is None or not isinstance(value, int) or value < 0:
+        return []
+    return [label for bit, label in IO_BIT_LABELS.items() if value & (1 << bit)]
+
+
+def decode_io_str(value):
+    """Return comma-separated string of active inputs, or INVALID for bad values."""
+    if value is None or not isinstance(value, int) or value < 0:
+        return 'INVALID'
+    labels = decode_io_bits(value)
+    return ', '.join(labels) if labels else 'NONE'
 
 # ── Tag lists ─────────────────────────────────────────────────────────────────
 #
@@ -369,23 +380,8 @@ def write_csv_row(filepath, row: dict):
 
 # ── Wire break parser ──────────────────────────────────────────────────────────
 
-def parse_broken_carriers(changed_mask: int, new_breaks_mask: int) -> list[dict]:
-    """
-    Given the XOR mask of changed bits and the subset that went 0 (broken),
-    return a list of dicts — one per broken bit — with carrier identification.
 
-    changed_mask   : prev ^ current  (all bits that flipped)
-    new_breaks_mask: prev & changed  (bits that went 1→0, i.e. active-low break)
-    """
-    carriers = []
-    for bit_index in range(16):
-        if new_breaks_mask & (1 << bit_index):
-            label = WIRE_BIT_TO_CARRIER.get(bit_index, f'Bit_{bit_index}')
-            carriers.append({
-                'bit_index': bit_index,
-                'carrier':   label,
-            })
-    return carriers
+
 
 
 # ── Daily utilization helper ──────────────────────────────────────────────────
@@ -402,6 +398,15 @@ def calculate_daily_state_percentages():
 
     # Scan live file bottom-up
     if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
+        try:
+            # Read header first to find State_Name column index
+            with open(PROCESS_LOG, 'r', encoding='utf-8', errors='replace') as f:
+                header_line = f.readline().strip()
+            headers = header_line.split(',')
+            state_col = headers.index('State_Name') if 'State_Name' in headers else 3
+        except Exception:
+            state_col = 3
+
         with open(PROCESS_LOG, 'rb') as f:
             try:
                 f.seek(0, os.SEEK_END)
@@ -433,10 +438,10 @@ def calculate_daily_state_percentages():
                         if not line_str or line_str.startswith('Timestamp'):
                             continue
                         parts = line_str.split(',')
-                        if len(parts) > 3:
+                        if len(parts) > state_col:
                             row_timestamp = parts[0]
                             if row_timestamp.startswith(today_str):
-                                sname = parts[3]
+                                sname = parts[state_col]
                                 if sname:
                                     state_counts[sname] = state_counts.get(sname, 0) + 1
                                     total_rows += 1
@@ -716,6 +721,7 @@ def monitor_loop():
                         'No_Msgs':               d.get('No_Machine_Msgs'),
                         'Machine_Faults':        d.get('Machine_Faults'),
                         'Wire_Break_Bits':       wire_bits,
+                        'IO_Decoded':            decode_io_str(wire_bits),
                         'Wire_Input_Fault':      d.get('Local:1:I.Fault'),
                         'Wire_Break_Detected':   d.get('WIre_Break_Detected'),
                         'Core_Break':            d.get('Core_Break'),
@@ -832,78 +838,55 @@ def monitor_loop():
                             prev_change[tag] = current_val
 
                     # ── Wire break detection → event_log + wire_break_log ────
+                    # Primary signal: WIre_Break_Detected (PLC-managed BOOL, typo intentional)
+                    # Local:1:I.Data is operator input context only — not used for detection.
+                    # Startup grace period prevents false triggers during servo settling.
                     in_startup = (
                         running_started_at is not None and
                         (now - running_started_at) < STARTUP_GRACE_SECONDS
                     )
 
-                    if wire_bits is not None and prev_wire_bits is not None:
-                        if wire_bits != prev_wire_bits:
-                            changed      = wire_bits ^ prev_wire_bits
-                            new_breaks   = prev_wire_bits & changed    # bits 1→0
-                            cleared_bits = wire_bits & changed          # bits 0→1
+                    wire_break_detected = d.get('WIre_Break_Detected')
+                    prev_wb_detected    = prev_change.get('WIre_Break_Detected')
 
-                            if machine_state == 16 and not in_startup:
-                                if new_breaks:
-                                    broken_carriers = parse_broken_carriers(changed, new_breaks)
-                                    for bc in broken_carriers:
-                                        _write_event(timestamp, 'WIRE_BREAK',
-                                                     from_val=str(prev_wire_bits),
-                                                     to_val=str(wire_bits),
-                                                     from_code=prev_wire_bits,
-                                                     to_code=wire_bits,
-                                                     puller_feet=puller_feet,
-                                                     recipe_name=recipe_name,
-                                                     d=d,
-                                                     detail=f"carrier={bc['carrier']} bit={bc['bit_index']}")
+                    if (machine_state == 16 and not in_startup and
+                            wire_break_detected and not prev_wb_detected):
+                        io_context = decode_io_str(wire_bits)
+                        log.warning(
+                            f'WIRE BREAK at {puller_feet:.2f} ft | '
+                            f'IO={wire_bits} ({io_context})'
+                        )
+                        _write_event(timestamp, 'WIRE_BREAK',
+                                     from_val='0',
+                                     to_val='1',
+                                     from_code=0,
+                                     to_code=1,
+                                     puller_feet=puller_feet,
+                                     recipe_name=recipe_name,
+                                     d=d,
+                                     detail=f'IO_bits={wire_bits} ({io_context})')
 
-                                        # Discrete wire_break_log row — one per broken carrier
-                                        wb_row = {
-                                            'Timestamp':        timestamp,
-                                            'Braider_ID':       BRAIDER_ID,
-                                            'Carrier':          bc['carrier'],
-                                            'Bit_Index':        bc['bit_index'],
-                                            'Bit_Mask_Before':  prev_wire_bits,
-                                            'Bit_Mask_After':   wire_bits,
-                                            'Bit_Changed_Mask': changed,
-                                            'Puller_Feet':      round(puller_feet, 4) if puller_feet else None,
-                                            'Machine_State':    machine_state,
-                                            'State_Name':       state_name(machine_state),
-                                            'Recipe_Name':      recipe_name,
-                                            'Recipe_PPI':       recipe_ppi,
-                                            'Active_Segment':   active_seg,
-                                            'Recover_Step':     d.get('Program:MainProgram.Recover_Step'),
-                                            'Recover_Position': d.get('Recover_Position'),
-                                        }
-                                        write_csv_row(WIRE_BREAK_LOG, wb_row)
+                        wb_row = {
+                            'Timestamp':        timestamp,
+                            'Braider_ID':       BRAIDER_ID,
+                            'IO_Raw':           wire_bits,
+                            'IO_Decoded':       io_context,
+                            'Puller_Feet':      round(puller_feet, 4) if puller_feet else None,
+                            'Machine_State':    machine_state,
+                            'State_Name':       state_name(machine_state),
+                            'Recipe_Name':      recipe_name,
+                            'Recipe_PPI':       recipe_ppi,
+                            'Active_Segment':   active_seg,
+                            'Machine_Faults':   d.get('Machine_Faults'),
+                            'Recover_Step':     d.get('Program:MainProgram.Recover_Step'),
+                            'Table_Speed':      round(table_speed, 4) if table_speed else None,
+                            'Puller_Speed':     round(puller_speed, 4) if puller_speed else None,
+                        }
+                        write_csv_row(WIRE_BREAK_LOG, wb_row)
 
-                                    log.warning(
-                                        f'WIRE BREAK — {len(broken_carriers)} carrier(s) at '
-                                        f'{puller_feet:.2f} ft | bits {bin(new_breaks)}'
-                                    )
-
-                                    # Start high-res post-break telemetry capture
-                                    _wb_capture_rows = list(_rolling_buffer)
-                                    _wb_capturing    = True
-                                    _wb_capture_until = now + POST_BREAK_CAPTURE_SECONDS
-
-                                if cleared_bits:
-                                    cleared_carriers = parse_broken_carriers(changed, cleared_bits)
-                                    for cc in cleared_carriers:
-                                        _write_event(timestamp, 'WIRE_BREAK_CLEARED',
-                                                     from_val=str(prev_wire_bits),
-                                                     to_val=str(wire_bits),
-                                                     from_code=prev_wire_bits,
-                                                     to_code=wire_bits,
-                                                     puller_feet=puller_feet,
-                                                     recipe_name=recipe_name,
-                                                     d=d,
-                                                     detail=f"carrier={cc['carrier']} bit={cc['bit_index']}")
-
-                            elif machine_state == 16 and in_startup:
-                                log.debug('Wire bits changed during startup grace — ignored.')
-                            else:
-                                log.debug('Wire bits changed while not RUNNING — ignored.')
+                        _wb_capture_rows  = list(_rolling_buffer)
+                        _wb_capturing     = True
+                        _wb_capture_until = now + POST_BREAK_CAPTURE_SECONDS
 
                     prev_wire_bits = wire_bits
 
@@ -921,6 +904,7 @@ def monitor_loop():
                             'active_segment':      active_seg,
                             'no_faults':           no_faults,
                             'wire_break_bits':     wire_bits,
+                            'io_decoded':          decode_io_bits(wire_bits),
                             'recipe_name':         recipe_name,
                             'recipe_ppi':          recipe_ppi,
                             'door_ok':             d.get('I_Door_Interlock_Ok'),
@@ -1187,12 +1171,16 @@ DASHBOARD_HTML = """
     <div class="section">Faults &amp; Safety</div>
     <div class="grid">
 
-        <div class="card">
-            <div class="label">Wire Break Inputs</div>
-            <div id="wb-div" class="value {% if d.wire_break_bits is not none and d.wire_break_bits != 3 %}fault blink{% else %}ok{% endif %}">
-                <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
+        <div class="card" style="grid-column: span 2;">
+            <div class="label">Operator Inputs — Local:1:I.Data</div>
+            <div style="display:flex; align-items:baseline; gap:12px; margin-top:6px;">
+                <div id="wb-div" class="value ok" style="font-size:22px; min-width:40px;">
+                    <span id="wb-value">{{ d.wire_break_bits if d.wire_break_bits is not none else '—' }}</span>
+                </div>
+                <div id="wb-binary" style="font-family:monospace; font-size:13px; color:#4fc3f7; letter-spacing:2px;">—</div>
             </div>
-            <div class="unit">Local:1:I.Data &nbsp;|&nbsp; normal = {{ normal_wire_bits }}</div>
+            <div id="io-decoded" style="margin-top:10px;"></div>
+            <div class="unit" style="margin-top:6px;">normal running = 3 &nbsp;(EStop_OK + Door_Closed)</div>
         </div>
 
         <div class="card">
@@ -1389,6 +1377,47 @@ async function fetchAndUpdate() {
         const vfdRef=document.getElementById('vfd-at-ref');
         if (vfdRef) vfdRef.innerHTML=data.vfd_at_ref?'&nbsp;<span class="ok">AT REF</span>':'';
         upd('wb-value', wb!==null?wb:'—');
+
+        // Decode Local:1:I.Data — show all 12 bits with index, value and label
+        const IO_BIT_LABELS = [
+            'EStop_OK','Door_Closed','Puller_SSW_Close','Puller_SSW_Open',
+            'Start_PB','Stop_PB','Jog_Fwd','TakeUp_OL',
+            'Upper_Prox','Lower_Prox','WireBreak_SW','Triaxial_SW'
+        ];
+        const ioEl  = document.getElementById('io-decoded');
+        const binEl = document.getElementById('wb-binary');
+        if (wb !== null && wb >= 0 && !isStale) {
+            let binStr = '';
+            for (let b = 11; b >= 0; b--) binStr += (wb & (1 << b)) ? '1' : '0';
+            if (binEl) binEl.textContent = binStr;
+            if (ioEl) {
+                let html = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:4px;">';
+                IO_BIT_LABELS.forEach((label, bit) => {
+                    const active = (wb & (1 << bit)) !== 0;
+                    const bg     = active ? '#1b3a1b' : '#1a1a1a';
+                    const color  = active ? '#66bb6a' : '#555';
+                    const border = active ? '#2d5a2d' : '#2a2a2a';
+                    html += `<div style="background:${bg};border:1px solid ${border};border-radius:4px;padding:4px 6px;text-align:center;">
+                        <div style="font-size:9px;color:#666;margin-bottom:1px;">bit ${bit}</div>
+                        <div style="font-size:15px;font-weight:bold;color:${color};">${active ? '1' : '0'}</div>
+                        <div style="font-size:9px;color:${color};margin-top:1px;line-height:1.3;">${label}</div>
+                    </div>`;
+                });
+                html += '</div>';
+                ioEl.innerHTML = html;
+            }
+        } else if (wb !== null && wb < 0) {
+            if (binEl) binEl.textContent = 'I/O FAULT';
+            if (ioEl)  ioEl.innerHTML = '<span style="color:#ef5350;font-size:12px;">INVALID — I/O module fault during physical disturbance</span>';
+        } else {
+            if (binEl) binEl.textContent = '—';
+            if (ioEl)  ioEl.textContent  = '—';
+        }
+        const wbDiv = document.getElementById('wb-div');
+        if (wbDiv) {
+            const abnormal = wb !== null && wb !== 3 && wb !== 1 && wb >= 0 && !isStale;
+            wbDiv.className = 'value ' + (abnormal ? 'warn' : 'ok');
+        }
         function setSafety(id,ok,okText,faultText,faultClass) {
             const el=document.getElementById(id); if (!el) return;
             el.textContent=(ok&&!isStale)?'✓ '+okText:'✗ '+(isStale?'DATA STALE':faultText);
@@ -1488,7 +1517,7 @@ def dashboard():
         plc_ip=PLC_IP,
         log_dir=LOG_DIR,
         braider_id=BRAIDER_ID,
-        normal_wire_bits=NORMAL_WIRE_BITS,
+        normal_wire_bits=IO_NORMAL_RUNNING,
     )
 
 
@@ -1964,9 +1993,12 @@ def api_floor_data():
     timestamps_, table_speed_, puller_speed_, speed_ratio_, states_ = [], [], [], [], []
     for row in matching:
         timestamps_.append(row.get('Timestamp',''))
-        try: table_speed_.append(float(row.get('Table_Speed',0) or 0))
+        # Support both old column names (pre-rewrite CSVs) and new names
+        ts_val = row.get('Table_Speed') or row.get('realTableSpeed') or 0
+        ps_val = row.get('Puller_Speed') or row.get('Puller_Actual_Speed') or 0
+        try: table_speed_.append(float(ts_val or 0))
         except: table_speed_.append(0)
-        try: puller_speed_.append(float(row.get('Puller_Speed',0) or 0))
+        try: puller_speed_.append(float(ps_val or 0))
         except: puller_speed_.append(0)
         try: speed_ratio_.append(float(row.get('Speed_Ratio') or 0) or None)
         except: speed_ratio_.append(None)
