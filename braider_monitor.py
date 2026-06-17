@@ -659,16 +659,37 @@ def flush_hires_event(pre_rows, post_rows, event_type, event_ts):
     filename = f'{BRAIDER_ID}_hires_{event_type.lower()}_{safe_ts}.csv'
     filepath = os.path.join(HIRES_LOG_DIR, filename)
 
+    # Ground-truth check — scan the FULL window (pre + post) for an actual PLC-confirmed
+    # wire break signal. This is independent of event_type/filename, which only reflects
+    # which trigger fired the capture, not what physically happened. Always use this
+    # column (not the filename) when building ML training labels.
+    all_source_rows = list(pre_rows) + list(post_rows)
+    confirmed_wire_break = any(
+        bool(r.get('Wire_Break_Detected')) or bool(r.get('Fault_WireBreak'))
+        for r in all_source_rows
+    )
+    confirmed_machine_fault_code = next(
+        (r.get('Machine_Faults') for r in all_source_rows
+         if r.get('Machine_Faults') not in (None, 0, 4)),
+        None
+    )
+
     all_rows = []
     for i, row in enumerate(pre_rows):
         r = dict(row)
-        r['Hires_Phase'] = 'PRE'
-        r['Hires_Offset_s'] = round((i - len(pre_rows)) * HIRES_POLL_INTERVAL, 2)
+        r['Event_Trigger']         = event_type     # WIRE_BREAK or ESTOP_OR_ABORT — capture trigger, NOT ground truth
+        r['Confirmed_Wire_Break']  = confirmed_wire_break   # ground truth — use this for ML labels
+        r['Confirmed_Fault_Code']  = confirmed_machine_fault_code
+        r['Hires_Phase']           = 'PRE'
+        r['Hires_Offset_s']        = round((i - len(pre_rows)) * HIRES_POLL_INTERVAL, 2)
         all_rows.append(r)
     for i, row in enumerate(post_rows):
         r = dict(row)
-        r['Hires_Phase'] = 'POST'
-        r['Hires_Offset_s'] = round((i + 1) * HIRES_POLL_INTERVAL, 2)
+        r['Event_Trigger']         = event_type
+        r['Confirmed_Wire_Break']  = confirmed_wire_break
+        r['Confirmed_Fault_Code']  = confirmed_machine_fault_code
+        r['Hires_Phase']           = 'POST'
+        r['Hires_Offset_s']        = round((i + 1) * HIRES_POLL_INTERVAL, 2)
         all_rows.append(r)
 
     if not all_rows:
@@ -681,7 +702,8 @@ def flush_hires_event(pre_rows, post_rows, event_type, event_ts):
 
     log.info(
         f'Hires event saved: {filename} '
-        f'({len(pre_rows)} pre + {len(post_rows)} post rows)'
+        f'({len(pre_rows)} pre + {len(post_rows)} post rows) '
+        f'confirmed_wire_break={confirmed_wire_break}'
     )
 
 
@@ -1075,6 +1097,68 @@ def monitor_loop():
                     write_csv_row(PROCESS_LOG, process_row)
                     _rolling_buffer.append(process_row.copy())
 
+                    # ── Wire break detection → event_log + wire_break_log ────
+                    # Primary signal: WIre_Break_Detected (PLC-managed BOOL, typo intentional)
+                    # Local:1:I.Data is operator input context only — not used for detection.
+                    # Startup grace period prevents false triggers during servo settling.
+                    # Checked BEFORE state-change so WIRE_BREAK always wins the hires
+                    # capture label when both conditions occur in the same poll cycle.
+                    in_startup = (
+                        running_started_at is not None and
+                        (now - running_started_at) < STARTUP_GRACE_SECONDS
+                    )
+
+                    wire_break_detected = d.get('WIre_Break_Detected')
+                    prev_wb_detected    = prev_change.get('WIre_Break_Detected')
+                    wire_break_fired_this_cycle = False
+
+                    if ((machine_state == 16 or prev_state == 16) and not in_startup and
+                            wire_break_detected and not prev_wb_detected):
+                        io_context = decode_io_str(wire_bits)
+                        log.warning(
+                            f'WIRE BREAK at {puller_feet:.2f} ft | '
+                            f'IO={wire_bits} ({io_context})'
+                        )
+                        _write_event(timestamp, 'WIRE_BREAK',
+                                     from_val='0',
+                                     to_val='1',
+                                     from_code=0,
+                                     to_code=1,
+                                     puller_feet=puller_feet,
+                                     recipe_name=recipe_name,
+                                     d=d,
+                                     detail=f'IO_bits={wire_bits} ({io_context})')
+
+                        wb_row = {
+                            'Timestamp':        timestamp,
+                            'Braider_ID':       BRAIDER_ID,
+                            'IO_Raw':           wire_bits,
+                            'IO_Decoded':       io_context,
+                            'Puller_Feet':      round(puller_feet, 4) if puller_feet else None,
+                            'Machine_State':    machine_state,
+                            'State_Name':       state_name(machine_state),
+                            'Recipe_Name':      recipe_name,
+                            'Recipe_PPI':       recipe_ppi,
+                            'Active_Segment':   active_seg,
+                            'Machine_Faults':   d.get('Machine_Faults'),
+                            'Recover_Step':     d.get('Program:MainProgram.Recover_Step'),
+                            'Table_Speed':      round(table_speed, 4) if table_speed else None,
+                            'Puller_Speed':     round(puller_speed, 4) if puller_speed else None,
+                        }
+                        write_csv_row(WIRE_BREAK_LOG, wb_row)
+
+                        # Wire break always wins the hires label — claim it first,
+                        # regardless of whether a state-change abort also fires this cycle.
+                        with _hires_lock:
+                            _hires_event_meta.update({
+                                'type':      'WIRE_BREAK',
+                                'timestamp': timestamp,
+                            })
+                        _hires_event.set()
+                        wire_break_fired_this_cycle = True
+
+                    prev_wire_bits = wire_bits
+
                     # ── State change → event_log ─────────────────────────────
                     if machine_state != prev_state and prev_state is not None:
                         _write_event(timestamp, 'STATE_CHANGE',
@@ -1087,10 +1171,12 @@ def monitor_loop():
                                      d=d)
                         log.info(f'State: {state_name(prev_state)} → {state_name(machine_state)}')
 
-                        # Trigger hires capture on unexpected stops from RUNNING
+                        # Trigger hires capture on unexpected stops from RUNNING.
+                        # Skip if wire break already claimed this cycle's capture above —
+                        # wire break is always the more specific, higher-priority root cause.
                         if prev_state == 16 and machine_state in (256, 512, 32):
                             # RUNNING → ABORTING / ABORTED / STOPPING = unplanned stop
-                            if not _hires_event.is_set():
+                            if not wire_break_fired_this_cycle and not _hires_event.is_set():
                                 with _hires_lock:
                                     _hires_event_meta.update({
                                         'type':      'ESTOP_OR_ABORT',
@@ -1098,6 +1184,8 @@ def monitor_loop():
                                     })
                                 _hires_event.set()
                                 log.info(f'Hires capture triggered: unplanned stop {state_name(prev_state)} → {state_name(machine_state)}')
+                            elif wire_break_fired_this_cycle:
+                                log.info('Unplanned stop also detected this cycle — already captured under WIRE_BREAK label.')
 
                     if machine_state == 16 and prev_state != 16:
                         running_started_at = now
@@ -1135,63 +1223,6 @@ def monitor_loop():
                                          detail=transition)
                             log.info(f'RBE: {tag} {transition}')
                             prev_change[tag] = current_val
-
-                    # ── Wire break detection → event_log + wire_break_log ────
-                    # Primary signal: WIre_Break_Detected (PLC-managed BOOL, typo intentional)
-                    # Local:1:I.Data is operator input context only — not used for detection.
-                    # Startup grace period prevents false triggers during servo settling.
-                    in_startup = (
-                        running_started_at is not None and
-                        (now - running_started_at) < STARTUP_GRACE_SECONDS
-                    )
-
-                    wire_break_detected = d.get('WIre_Break_Detected')
-                    prev_wb_detected    = prev_change.get('WIre_Break_Detected')
-
-                    if ((machine_state == 16 or prev_state == 16) and not in_startup and
-                            wire_break_detected and not prev_wb_detected):
-                        io_context = decode_io_str(wire_bits)
-                        log.warning(
-                            f'WIRE BREAK at {puller_feet:.2f} ft | '
-                            f'IO={wire_bits} ({io_context})'
-                        )
-                        _write_event(timestamp, 'WIRE_BREAK',
-                                     from_val='0',
-                                     to_val='1',
-                                     from_code=0,
-                                     to_code=1,
-                                     puller_feet=puller_feet,
-                                     recipe_name=recipe_name,
-                                     d=d,
-                                     detail=f'IO_bits={wire_bits} ({io_context})')
-
-                        wb_row = {
-                            'Timestamp':        timestamp,
-                            'Braider_ID':       BRAIDER_ID,
-                            'IO_Raw':           wire_bits,
-                            'IO_Decoded':       io_context,
-                            'Puller_Feet':      round(puller_feet, 4) if puller_feet else None,
-                            'Machine_State':    machine_state,
-                            'State_Name':       state_name(machine_state),
-                            'Recipe_Name':      recipe_name,
-                            'Recipe_PPI':       recipe_ppi,
-                            'Active_Segment':   active_seg,
-                            'Machine_Faults':   d.get('Machine_Faults'),
-                            'Recover_Step':     d.get('Program:MainProgram.Recover_Step'),
-                            'Table_Speed':      round(table_speed, 4) if table_speed else None,
-                            'Puller_Speed':     round(puller_speed, 4) if puller_speed else None,
-                        }
-                        write_csv_row(WIRE_BREAK_LOG, wb_row)
-
-                        # Signal hires_loop to flush ring buffer + capture post-event
-                        with _hires_lock:
-                            _hires_event_meta.update({
-                                'type':      'WIRE_BREAK',
-                                'timestamp': timestamp,
-                            })
-                        _hires_event.set()
-
-                    prev_wire_bits = wire_bits
 
                     # ── Update Flask shared state ────────────────────────────
                     with _lock:
@@ -1998,16 +2029,41 @@ def api_hires_events():
             post_rows = sum(1 for r in rows if r.get('Hires_Phase') == 'POST')
             first_ts  = rows[0].get('Timestamp', '') if rows else ''
             event_ts  = next((r.get('Timestamp','') for r in rows if r.get('Hires_Phase')=='POST'), '')
+            # Prefer the explicit column; fall back to parsing the filename for older files
+            trigger = rows[0].get('Event_Trigger') if rows else None
+            if not trigger:
+                if 'wire_break' in name.lower():
+                    trigger = 'WIRE_BREAK'
+                elif 'estop' in name.lower() or 'abort' in name.lower():
+                    trigger = 'ESTOP_OR_ABORT'
+                else:
+                    trigger = 'UNKNOWN'
+
+            # Ground truth — prefer the stored column; recompute from raw signals
+            # for older files that predate this column.
+            if rows and 'Confirmed_Wire_Break' in rows[0]:
+                raw_cwb = rows[0].get('Confirmed_Wire_Break')
+                confirmed_wb = str(raw_cwb).strip().lower() in ('true', '1')
+            else:
+                confirmed_wb = any(
+                    str(r.get('Wire_Break_Detected','')).strip().lower() in ('true','1') or
+                    str(r.get('Fault_WireBreak','')).strip().lower()    in ('true','1')
+                    for r in rows
+                ) if rows else False
         except Exception:
             pre_rows = post_rows = 0
             first_ts = event_ts = ''
+            trigger = 'UNKNOWN'
+            confirmed_wb = False
         result.append({
-            'filename':   name,
-            'size_kb':    round(size / 1024, 1),
-            'pre_rows':   pre_rows,
-            'post_rows':  post_rows,
-            'first_ts':   first_ts,
-            'event_ts':   event_ts,
+            'filename':            name,
+            'size_kb':             round(size / 1024, 1),
+            'pre_rows':            pre_rows,
+            'post_rows':           post_rows,
+            'first_ts':            first_ts,
+            'event_ts':            event_ts,
+            'event_trigger':       trigger,
+            'confirmed_wire_break':confirmed_wb,
         })
     return jsonify(result)
 
