@@ -2234,17 +2234,17 @@ tr:hover td { background:#161b22; }
 <!-- ── State Timeline Charts ── -->
 <div class="section">
   <div class="section-title">Today — Machine State Timeline</div>
-  <div id="todayChart" style="width:100%;height:220px;"></div>
+  <div id="todayChart" style="width:100%;height:220px;background:#0d1117;"></div>
 </div>
 
 <div class="section">
   <div class="section-title">This Week — Machine State Timeline</div>
-  <div id="weekChart" style="width:100%;height:220px;"></div>
+  <div id="weekChart" style="width:100%;height:220px;background:#0d1117;"></div>
 </div>
 
 <div class="section">
   <div class="section-title">Last Week — Machine State Timeline</div>
-  <div id="lastWeekChart" style="width:100%;height:220px;"></div>
+  <div id="lastWeekChart" style="width:100%;height:220px;background:#0d1117;"></div>
 </div>
 
 <!-- ── Changeovers Table ── -->
@@ -2302,6 +2302,20 @@ const STATE_COLORS = {
     'PAUSING':'#ffb74d','PAUSED':'#ffa726','ABORTING':'#ab47bc','ABORTED':'#b71c1c'
 };
 
+function getChartLayout() {
+    return {
+        paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
+        font:{color:'#8b949e', size:11},
+        margin:{t:10, r:20, b:40, l:80},
+        height:220,
+        showlegend:true,
+        legend:{orientation:'h', y:-0.25, font:{size:10}},
+        xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
+        yaxis:{gridcolor:'#21262d', tickfont:{size:11}, categoryorder:'array',
+               categoryarray:['ABORTED','ABORTING','STOPPING','PAUSED','PAUSING','STOPPED','OFF','READY','STARTING','RUNNING']},
+    };
+}
+
 function buildStateChart(divId, data) {
     if (!data.timestamps || !data.timestamps.length) {
         document.getElementById(divId).innerHTML =
@@ -2323,18 +2337,7 @@ function buildStateChart(divId, data) {
         marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
         type: 'scatter'
     }));
-    const layout = {
-        paper_bgcolor:'#0d1117', plot_bgcolor:'#0d1117',
-        font:{color:'#8b949e', size:11},
-        margin:{t:10, r:20, b:40, l:80},
-        height:220,
-        showlegend:true,
-        legend:{orientation:'h', y:-0.25, font:{size:10}},
-        xaxis:{gridcolor:'#21262d', tickfont:{size:10}},
-        yaxis:{gridcolor:'#21262d', tickfont:{size:11}, categoryorder:'array',
-               categoryarray:['ABORTED','ABORTING','STOPPING','PAUSED','PAUSING','STOPPED','OFF','READY','STARTING','RUNNING']},
-    };
-    Plotly.newPlot(divId, plotTraces, layout, {responsive:true, displayModeBar:false});
+    Plotly.newPlot(divId, plotTraces, getChartLayout(), {responsive:true, displayModeBar:false});
 }
 
 function drawPie(canvasId, legendId, data) {
@@ -2411,7 +2414,9 @@ async function updateFloor() {
 }
 
 function updateStateChart(divId, data) {
-    // Plotly.react updates data in-place without blanking the chart
+    // Plotly.react updates data in-place without blanking the chart.
+    // Layout must be passed explicitly every call — omitting it (undefined)
+    // makes Plotly fall back to its default white theme during the repaint.
     const byState = {};
     for (let i = 0; i < data.timestamps.length; i++) {
         const s = data.states[i]; if (!s) continue;
@@ -2424,7 +2429,7 @@ function updateStateChart(divId, data) {
         marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
         type: 'scatter'
     }));
-    Plotly.react(divId, plotTraces, undefined, {responsive:true, displayModeBar:false});
+    Plotly.react(divId, plotTraces, getChartLayout(), {responsive:true, displayModeBar:false});
 }
 
 // Initial load then refresh every 60s without page blank
