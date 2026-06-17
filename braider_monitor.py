@@ -162,7 +162,6 @@ FAST_TAGS = [
     'Run_Complete',
     'Length_To_Run',
     'Transition_Active',
-    'No_Machine_Faults',
     'No_Machine_Msgs',
     'Machine_Faults',
     # Wire break recovery & events
@@ -803,14 +802,140 @@ def hires_loop():
             retry_delay = min(retry_delay * 2, 60)
 
 
-# ── Monitor loop ──────────────────────────────────────────────────────────────
+# ── OEE shared state — populated by oee_loop, read by monitor_loop ───────────
+_oee_lock     = threading.Lock()
+_oee_data     = {}          # latest od values
+_oee_derived  = {           # parsed values ready to use in process_row/event
+    'recipe_name':    'Unknown',
+    'recipe_ppi':     None,
+    'cum_running':    None,
+    'cum_stopped':    None,
+    'cum_ready':      None,
+    'recipe_modified': None,
+    'mandrel_mode':   None,
+}
+_oee_pending_write = threading.Event()   # set when a new OEE row is ready to write
+_oee_row_buffer    = {}                  # the row to write, set by oee_loop
+
+
+def oee_loop():
+    """
+    Polls OEE_TAGS on its own independent PLC connection every 60s.
+    Parses the UDT, updates _oee_data and _oee_derived under _oee_lock,
+    then signals _oee_pending_write so monitor_loop can flush to CSV
+    on its next 2s cycle (keeping CSV writes single-threaded).
+    """
+    global _oee_data, _oee_derived, _oee_row_buffer
+
+    log.info('OEE loop started — establishing own PLC connection.')
+    retry_delay = 10
+
+    while True:
+        try:
+            with LogixDriver(PLC_IP) as oplc:
+                if not oplc.connected:
+                    raise ConnectionError('OEE LogixDriver connected=False')
+                log.info('OEE loop PLC connected (own session).')
+                retry_delay = 10
+
+                # Poll immediately on connect, then every 60s
+                last_poll = 0
+
+                while True:
+                    now_oee = time.time()
+                    if last_poll == 0 or (now_oee - last_poll >= OEE_POLL_INTERVAL):
+                        results = oplc.read(*OEE_TAGS)
+                        od = {r.tag: r.value for r in results if r.error is None}
+
+                        # Parse UDTs
+                        stats       = od.get('Machine_Statistics', {})
+                        recipe_raw  = od.get('CurrentRecipe', {})
+                        cum_running = cum_stopped = cum_ready = None
+                        recipe_name_local = 'Unknown'
+                        recipe_ppi_local  = None
+
+                        if isinstance(stats, dict):
+                            cum = stats.get('Cum_State_Time', {})
+                            if isinstance(cum, dict):
+                                cum_running = cum.get('Running', {}).get('Hours')
+                                cum_stopped = cum.get('Stopped', {}).get('Hours')
+                                cum_ready   = cum.get('Ready',   {}).get('Hours')
+
+                        if isinstance(recipe_raw, dict):
+                            recipe_name_local = recipe_raw.get('Name', 'Unknown')
+                            hi_ppi     = od.get('Hi_PPI')
+                            hi_running = od.get('Hi_PPI_Running')
+                            try:
+                                if hi_running == 1 and hi_ppi is not None:
+                                    recipe_ppi_local = hi_ppi
+                                else:
+                                    segments  = recipe_raw.get('Segments', [])
+                                    seg_idx   = int(od.get('Active_Segment') or 1)
+                                    seg_data  = segments[seg_idx] if segments else None
+                                    seg_picks = seg_data.get('Picks') if seg_data else None
+                                    recipe_ppi_local = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
+                            except Exception:
+                                recipe_ppi_local = recipe_raw.get('Connector_PPI')
+
+                        # Update shared state under lock
+                        with _oee_lock:
+                            _oee_data = od
+                            _oee_derived.update({
+                                'recipe_name':     recipe_name_local,
+                                'recipe_ppi':      recipe_ppi_local,
+                                'cum_running':     cum_running,
+                                'cum_stopped':     cum_stopped,
+                                'cum_ready':       cum_ready,
+                                'recipe_modified': od.get('Recipe_Modified'),
+                                'mandrel_mode':    od.get('HMI_Mandrel_Mode'),
+                            })
+                            _oee_row_buffer = {
+                                'Timestamp':          ts(),
+                                'Braider_ID':         BRAIDER_ID,
+                                'Machine_State':      None,   # filled in by monitor_loop
+                                'State_Name':         None,
+                                'Active_Segment':     od.get('Active_Segment'),
+                                'Recipe_Name':        recipe_name_local,
+                                'Recipe_Number':      od.get('HMI_Recipe_Number'),
+                                'Recipe_PPI':         recipe_ppi_local,
+                                'Recipe_Modified':    od.get('Recipe_Modified'),
+                                'Mandrel_Mode':       od.get('HMI_Mandrel_Mode'),
+                                'Carriers':           od.get('HMI_NumberCarriers'),
+                                'Discrete_Distance':  od.get('Discrete_Distance'),
+                                'Discrete_Loops':     od.get('Discrete_Loops'),
+                                'Loop_Length_Feet':   od.get('Loop_Length_Feet'),
+                                'Carrier_Mode':       od.get('Carrier_Mode'),
+                                'Current_Ratio':      od.get('Current_Ratio'),
+                                'Base_Ratio':         od.get('Base_Ratio'),
+                                'Low_PPI':            od.get('Low_PPI'),
+                                'Hi_PPI':             od.get('Hi_PPI'),
+                                'Triaxial_Enable':    od.get('Triaxial_Enable'),
+                                'PowerOn_Days':       od.get('PowerOn_Days.ACC'),
+                                'PowerOn_Hours':      od.get('PowerOn_Hours.ACC'),
+                                'Cum_Running_Hrs':    cum_running,
+                                'Cum_Stopped_Hrs':    cum_stopped,
+                                'Cum_Ready_Hrs':      cum_ready,
+                                'Puller_Life_Ft':     stats.get('Puller_Life_Ft')     if isinstance(stats, dict) else None,
+                                'Table_Life_1k_Revs': stats.get('Table_Life_1k_Revs') if isinstance(stats, dict) else None,
+                            }
+
+                        _oee_pending_write.set()
+                        last_poll = now_oee
+                        log.debug('OEE poll complete.')
+
+                    time.sleep(1)
+
+        except Exception as e:
+            log.warning(f'OEE loop error: {e} — retrying in {retry_delay}s')
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 120)
+
 
 def monitor_loop():
 
     prev_state     = None
     prev_wire_bits = None
     prev_change    = {}
-    last_oee_poll  = 0
     recipe_name    = 'Unknown'
     recipe_ppi     = None
     running_started_at = None
@@ -831,8 +956,6 @@ def monitor_loop():
                     _latest['connected']   = True
                     _latest['last_error']  = None
 
-                od = {}
-
                 while True:
                     now       = time.time()
                     timestamp = ts()
@@ -846,7 +969,7 @@ def monitor_loop():
                     puller_feet   = d.get('Puller_Pos_Feet')
                     table_pos     = d.get('Table_Position')
                     active_seg    = d.get('Active_Segment')
-                    no_faults     = d.get('No_Machine_Faults')
+                    # no_faults removed — use Machine_Faults == 0 or 4 instead
                     wire_bits     = d.get('Local:1:I.Data')
                     table_speed   = d.get('realTableSpeed')      # filtered table rev/s
 
@@ -867,75 +990,23 @@ def monitor_loop():
                     if pcv is not None and pav is not None:
                         puller_vel_cmd_err = pcv - pav
 
-                    # ── OEE poll (first loop + every 60s) ───────────────────
-                    cum_running = cum_stopped = cum_ready = None
-                    recipe_modified = mandrel_mode = None
+                    # ── Read OEE derived values (non-blocking from oee_loop) ──
+                    with _oee_lock:
+                        oee = dict(_oee_derived)
+                        # Flush pending OEE row if oee_loop produced one
+                        if _oee_pending_write.is_set():
+                            _oee_pending_write.clear()
+                            pending_oee = dict(_oee_row_buffer)
+                        else:
+                            pending_oee = None
 
-                    if last_oee_poll == 0 or (now - last_oee_poll >= OEE_POLL_INTERVAL):
-                        oee_results = plc.read(*OEE_TAGS)
-                        od = {r.tag: r.value for r in oee_results if r.error is None}
+                    recipe_name = oee.get('recipe_name', recipe_name)
+                    recipe_ppi  = oee.get('recipe_ppi',  recipe_ppi)
 
-                        stats = od.get('Machine_Statistics', {})
-                        if isinstance(stats, dict):
-                            cum = stats.get('Cum_State_Time', {})
-                            if isinstance(cum, dict):
-                                cum_running = cum.get('Running', {}).get('Hours')
-                                cum_stopped = cum.get('Stopped', {}).get('Hours')
-                                cum_ready   = cum.get('Ready',   {}).get('Hours')
-
-                        recipe_raw = od.get('CurrentRecipe', {})
-                        if isinstance(recipe_raw, dict):
-                            recipe_name = recipe_raw.get('Name', 'Unknown')
-
-                            hi_ppi     = od.get('Hi_PPI')
-                            low_ppi    = od.get('Low_PPI')
-                            hi_running = od.get('Hi_PPI_Running')
-                            try:
-                                if hi_running == 1 and hi_ppi is not None:
-                                    recipe_ppi = hi_ppi
-                                else:
-                                    segments   = recipe_raw.get('Segments', [])
-                                    seg_idx    = int(od.get('Active_Segment') or 1)
-                                    seg_data   = segments[seg_idx] if segments else None
-                                    seg_picks  = seg_data.get('Picks') if seg_data else None
-                                    recipe_ppi = seg_picks if (seg_picks and seg_picks > 0) else recipe_raw.get('Connector_PPI')
-                            except Exception:
-                                recipe_ppi = recipe_raw.get('Connector_PPI')
-
-                            recipe_modified = od.get('Recipe_Modified')
-                            mandrel_mode    = od.get('HMI_Mandrel_Mode')
-
-                        oee_row = {
-                            'Timestamp':          timestamp,
-                            'Braider_ID':         BRAIDER_ID,
-                            'Machine_State':      machine_state,
-                            'State_Name':         state_name(machine_state) if machine_state else '',
-                            'Active_Segment':     od.get('Active_Segment'),
-                            'Recipe_Name':        recipe_name,
-                            'Recipe_Number':      od.get('HMI_Recipe_Number'),
-                            'Recipe_PPI':         recipe_ppi,
-                            'Recipe_Modified':    recipe_modified,
-                            'Mandrel_Mode':       mandrel_mode,
-                            'Carriers':           od.get('HMI_NumberCarriers'),
-                            'Discrete_Distance':  od.get('Discrete_Distance'),
-                            'Discrete_Loops':     od.get('Discrete_Loops'),
-                            'Loop_Length_Feet':   od.get('Loop_Length_Feet'),
-                            'Carrier_Mode':       od.get('Carrier_Mode'),
-                            'Current_Ratio':      od.get('Current_Ratio'),
-                            'Base_Ratio':         od.get('Base_Ratio'),
-                            'Low_PPI':            od.get('Low_PPI'),
-                            'Hi_PPI':             od.get('Hi_PPI'),
-                            'Triaxial_Enable':    od.get('Triaxial_Enable'),
-                            'PowerOn_Days':       od.get('PowerOn_Days.ACC'),
-                            'PowerOn_Hours':      od.get('PowerOn_Hours.ACC'),
-                            'Cum_Running_Hrs':    cum_running,
-                            'Cum_Stopped_Hrs':    cum_stopped,
-                            'Cum_Ready_Hrs':      cum_ready,
-                            'Puller_Life_Ft':     stats.get('Puller_Life_Ft')     if isinstance(stats, dict) else None,
-                            'Table_Life_1k_Revs': stats.get('Table_Life_1k_Revs') if isinstance(stats, dict) else None,
-                        }
-                        write_csv_row(OEE_LOG, oee_row)
-                        last_oee_poll = now
+                    if pending_oee:
+                        pending_oee['Machine_State'] = machine_state
+                        pending_oee['State_Name']    = state_name(machine_state) if machine_state else ''
+                        write_csv_row(OEE_LOG, pending_oee)
 
                     # ── Process log row ──────────────────────────────────────
                     process_row = {
@@ -950,24 +1021,20 @@ def monitor_loop():
                         'Table_Position':        round(table_pos, 4)    if table_pos    else None,
                         'Active_Segment':        active_seg,
                         'State_Elapsed_Secs':    state_elapsed_s,
-                        'No_Faults':             no_faults,
-                        'No_Msgs':               d.get('No_Machine_Msgs'),
                         'Machine_Faults':        d.get('Machine_Faults'),
                         # Wire break
                         'Wire_Break_Bits':       wire_bits,
                         'IO_Decoded':            decode_io_str(wire_bits),
-                        'Wire_Input_Fault':      d.get('Local:1:I.Fault'),
                         'Wire_Break_Detected':   d.get('WIre_Break_Detected'),
                         'Core_Break':            d.get('Core_Break'),
-                        'WireBreak_Move':        d.get('WireBreak_Move'),
-                        # Safety context (state columns — useful every 2s for ML)
+                        # Safety context
                         'Door_Ok':               d.get('I_Door_Interlock_Ok'),
                         'Estop_Ok':              d.get('I_Emergency_Stop_Ok'),
                         'Guards_Ok':             d.get('Machine.Guards_Ok'),
                         'All_Safties_Ok':        d.get('Machine.All_Safties_Ok'),
                         'All_Axes_Ok':           d.get('Machine.All_Axes_Ok'),
                         'All_Axes_Running':      d.get('Machine.All_Axes_Running'),
-                        # Recipe context
+                        # Recipe context (from oee_loop)
                         'Recipe_Name':           recipe_name,
                         'Recipe_PPI':            recipe_ppi,
                         # VFD
@@ -977,32 +1044,25 @@ def monitor_loop():
                             (d.get('Table_Drive:O.FreqCommand') or 0) -
                             (d.get('Table_Drive:I.OutputFreq')  or 0)
                         ),
-                        'VFD_Faulted':           d.get('Table_Drive:I.Faulted'),
                         'VFD_Active':            d.get('Table_Drive:I.Active'),
                         'VFD_AtReference':       d.get('Table_Drive:I.AtReference'),
                         # Run state
-                        'Transition_Active':     d.get('Transition_Active'),
                         'Taper_Sensor':          d.get('Taper_Sensor_Input'),
-                        'Sensor_Mode':           d.get('Sensor_Mode_Enable'),
                         'Length_To_Run':         d.get('Length_To_Run'),
                         'Run_Complete':          d.get('Run_Complete'),
                         'EStop_Recover':         d.get('EStop_Recover'),
                         'Sequence_Step':         d.get('Sequence_Step'),
                         'PullerMasterAxis':      d.get('PullerMasterAxis'),
                         'New_Part_Latch':        d.get('New_Part_Latch'),
-                        'New_Part_ONS':          d.get('New_Part_ONS'),
-                        'PPI_Change_ONS':        d.get('PPI_Change_ONS'),
                         'Puller_Position_Error': d.get('Puller_Position_Error'),
-                        # Program-scoped
+                        # Program-scoped faults
                         'Fault_WireBreak':       d.get('Program:MainProgram.Fault_WireBreak'),
                         'Fault_EStop':           d.get('Program:MainProgram.Fault_EStop'),
                         'Fault_GuardDoor':       d.get('Program:MainProgram.Fault_GuardDoor'),
                         'Fault_PullerServo':     d.get('Program:MainProgram.Fault_PullerServo'),
                         'Fault_TableServo':      d.get('Program:MainProgram.Fault_TableServo'),
-                        'Recover_Step':          d.get('Program:MainProgram.Recover_Step'),
                         'Puller_Current_Dist':   d.get('Program:MainProgram.Puller_Current_Dist'),
                         'Table_Current_Dist':    d.get('Program:MainProgram.Table_Current_Dist'),
-                        'Servo_Axis_Faults':     d.get('Program:P01_TableDrive.Servo_Axis_Faults'),
                         # Servo sub-tags
                         'Puller_ActualVel':      d.get('servoPuller_Axis.ActualVelocity'),
                         'Puller_CmdVel':         d.get('servoPuller_Axis.CommandVelocity'),
@@ -1044,10 +1104,9 @@ def monitor_loop():
                     prev_state = machine_state
 
                     # ── RBE CHANGE_TAGS → event_log ──────────────────────────
-                    # Tags may come from fast poll (d) or OEE poll (od).
-                    # od is initialized to {} and updated every 60s — safe to merge always.
-                    # Guards: skip -32767/-32000 (pycomm3 I/O fault), skip None.
-                    _combined = {**od, **d}  # fast poll (d) takes precedence over OEE (od)
+                    with _oee_lock:
+                        oee_snap = dict(_oee_data)
+                    _combined = {**oee_snap, **d}  # fast poll (d) takes precedence
 
                     for tag in CHANGE_TAGS:
                         current_val = _combined.get(tag)
@@ -1146,7 +1205,8 @@ def monitor_loop():
                             'puller_pos_feet':     round(puller_feet, 2)  if puller_feet  else None,
                             'table_position':      round(table_pos, 2)    if table_pos    else None,
                             'active_segment':      active_seg,
-                            'no_faults':           no_faults,
+                            'machine_faults':      d.get('Machine_Faults'),
+                            'no_faults':           (d.get('Machine_Faults') in (None, 0, 4)),
                             'wire_break_bits':     wire_bits,
                             'io_decoded':          decode_io_bits(wire_bits),
                             'recipe_name':         recipe_name,
@@ -1258,7 +1318,7 @@ def _write_event(timestamp, event_type, *, from_val, to_val, from_code,
         'State_Name':  state_name(d.get('Machine_State')) if d.get('Machine_State') else '',
         'Estop_Ok':    d.get('I_Emergency_Stop_Ok'),
         'Door_Ok':     d.get('I_Door_Interlock_Ok'),
-        'No_Faults':   d.get('No_Machine_Faults'),
+        'No_Faults':   d.get('Machine_Faults') in (None, 0, 4),
         'Machine_Faults': d.get('Machine_Faults'),
         'Detail':      detail,
     }
@@ -1476,12 +1536,18 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="card">
-            <div class="label">Recovery Step</div>
-            <div class="value" style="font-size:26px">
-                <span id="recover-step">{{ d.recover_step or '—' }}</span>
+            <div class="label">Recovery &amp; Sequence</div>
+            <div class="checks" style="font-size:13px; margin-top:6px;">
+                <span id="wb-detected" class="{{ 'fault' if d.wire_break_detected else 'ok' }}" style="font-weight:bold;">
+                    {{ '✗ Wire Break DETECTED' if d.wire_break_detected else '✓ Wire Break clear' }}
+                </span><br>
+                <span style="color:#8b949e; font-size:12px; margin-top:4px; display:block;">
+                    Sequence step: <span id="sequence-step" style="color:#4fc3f7;">{{ d.sequence_step or '—' }}</span>
+                </span>
+                <span style="color:#8b949e; font-size:12px;">
+                    Puller master: <span id="puller-master" style="color:#4fc3f7;">{{ 'Yes' if d.puller_master_axis else 'No' }}</span>
+                </span>
             </div>
-            <div class="unit" style="margin-top:4px;">Sequence step: <span id="sequence-step" style="color:#4fc3f7">{{ d.sequence_step or '—' }}</span></div>
-            <div class="unit" style="margin-top:2px;">Wire break: <span id="wb-detected" class="{{ 'fault' if d.wire_break_detected else 'ok' }}" style="font-weight:bold;">{{ 'DETECTED' if d.wire_break_detected else 'clear' }}</span></div>
         </div>
 
     </div>
@@ -1782,7 +1848,6 @@ async function fetchAndUpdate() {
         if (revsEl) revsEl.textContent = (!isStale && tableRevs) ? tableRevs.toFixed(4) : '—';
         upd('puller-value',    ps ? ps.toFixed(4) : '—');
         upd('ratio-value',     sr ? sr.toFixed(5) : '—');
-        upd('recover-step',    data.recover_step  != null ? data.recover_step  : '—');
         upd('vfd-actual',      data.vfd_freq_actual  != null ? data.vfd_freq_actual  : '—');
         upd('vfd-command',     data.vfd_freq_command != null ? data.vfd_freq_command : '—');
         upd('vfd-delta',       data.vfd_freq_delta   != null ? data.vfd_freq_delta   : '0');
@@ -1853,11 +1918,12 @@ async function fetchAndUpdate() {
         setFault('fault-table',  data.fault_table_servo,  'Table Servo',  'Table Servo');
 
         // Recovery card
-        upd('recover-step',   data.recover_step   != null ? data.recover_step   : '—');
         upd('sequence-step',  data.sequence_step  != null ? data.sequence_step  : '—');
+        const pmEl = document.getElementById('puller-master');
+        if (pmEl && !isStale) pmEl.textContent = data.puller_master_axis ? 'Yes' : 'No';
         const wbDetEl = document.getElementById('wb-detected');
         if (wbDetEl && !isStale) {
-            wbDetEl.textContent = data.wire_break_detected ? 'DETECTED' : 'clear';
+            wbDetEl.textContent = data.wire_break_detected ? '✗ Wire Break DETECTED' : '✓ Wire Break clear';
             wbDetEl.className   = data.wire_break_detected ? 'fault' : 'ok';
         }
 
@@ -2066,7 +2132,6 @@ FLOOR_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="refresh" content="60">
 <title>Braider 2 — Floor Report</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2101,7 +2166,7 @@ tr:hover td { background:#161b22; }
 <body>
 
 <h1>Braider 2 — Daily Performance</h1>
-<div class="subtitle">{{ d.date }} &nbsp;·&nbsp; Refreshes every 60s &nbsp;·&nbsp; {{ d.total_hrs }}h logged today</div>
+<div class="subtitle">{{ d.date }} &nbsp;·&nbsp; {{ d.total_hrs }}h logged today &nbsp;·&nbsp; <span id="last-refresh" style="color:#58a6ff;">Loading...</span></div>
 
 <div class="scorecard">
 
@@ -2308,7 +2373,10 @@ function drawPie(canvasId, legendId, data) {
     if (legend) legend.innerHTML=legendHTML;
 }
 
-(async function() {
+// Track whether charts have been initialized
+let chartsInitialized = false;
+
+async function updateFloor() {
     try {
         const [todayRes, weekRes, lastWeekRes] = await Promise.all([
             fetch('/api/floor_data?range=today'),
@@ -2318,19 +2386,53 @@ function drawPie(canvasId, legendId, data) {
         const todayData    = await todayRes.json();
         const weekData     = await weekRes.json();
         const lastWeekData = await lastWeekRes.json();
+
+        // Pies always redraw fast (canvas, not Plotly)
         drawPie('todayPie',    'todayPieLegend',    todayData);
         drawPie('weekPie',     'weekPieLegend',     weekData);
         drawPie('lastWeekPie', 'lastWeekPieLegend', lastWeekData);
-        buildStateChart('todayChart',    todayData);
-        buildStateChart('weekChart',     weekData);
-        buildStateChart('lastWeekChart', lastWeekData);
+
+        // Charts: newPlot on first load, react (in-place update) on subsequent
+        if (!chartsInitialized) {
+            buildStateChart('todayChart',    todayData);
+            buildStateChart('weekChart',     weekData);
+            buildStateChart('lastWeekChart', lastWeekData);
+            chartsInitialized = true;
+        } else {
+            updateStateChart('todayChart',    todayData);
+            updateStateChart('weekChart',     weekData);
+            updateStateChart('lastWeekChart', lastWeekData);
+        }
+
+        // Update last-refreshed timestamp
+        const tsEl = document.getElementById('last-refresh');
+        if (tsEl) tsEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
+
     } catch(e) {
-        ['todayChart','weekChart','lastWeekChart'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.innerHTML = '<p style="color:#8b949e;padding:20px">Chart unavailable.</p>';
-        });
+        console.warn('Floor update error:', e);
     }
-})();
+}
+
+function updateStateChart(divId, data) {
+    // Plotly.react updates data in-place without blanking the chart
+    const byState = {};
+    for (let i = 0; i < data.timestamps.length; i++) {
+        const s = data.states[i]; if (!s) continue;
+        if (!byState[s]) byState[s] = [];
+        byState[s].push(data.timestamps[i]);
+    }
+    const plotTraces = Object.entries(byState).map(([state, times]) => ({
+        x: times, y: Array(times.length).fill(state),
+        mode: 'markers', name: state,
+        marker: { color: STATE_COLORS[state] || '#999', size: 5, symbol: 'square' },
+        type: 'scatter'
+    }));
+    Plotly.react(divId, plotTraces, undefined, {responsive:true, displayModeBar:false});
+}
+
+// Initial load then refresh every 60s without page blank
+updateFloor();
+setInterval(updateFloor, 60000);
 </script>
 </body>
 </html>"""
