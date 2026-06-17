@@ -2543,6 +2543,10 @@ if __name__ == '__main__':
     hires_thread = threading.Thread(target=hires_loop, daemon=True, name='hires')
     hires_thread.start()
 
+    # OEE thread — 60s polling, own connection, feeds recipe/PPI/cum-hours to monitor_loop
+    oee_thread = threading.Thread(target=oee_loop, daemon=True, name='oee')
+    oee_thread.start()
+
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name='monitor')
     monitor_thread.start()
 
