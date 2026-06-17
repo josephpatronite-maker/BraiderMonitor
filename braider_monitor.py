@@ -1414,12 +1414,15 @@ DASHBOARD_HTML = """
     <div class="grid">
 
         <div class="card">
-            <div class="label">Table Speed</div>
-            <div class="value" id="table-value">{{ d.vfd_freq_actual or '—' }}</div>
+            <div class="label">Table Speed — Actual</div>
+            <div class="value" id="table-value">{{ d.table_rpm_actual or '0' }}</div>
             <div class="unit">
-                VFD Hz×10 &nbsp;|&nbsp;
-                <span id="table-rpm-value" style="color:#4fc3f7">—</span> rpm &nbsp;|&nbsp;
-                <span id="table-revs-value" style="color:#888">—</span> rev/s (filtered)
+                rpm &nbsp;|&nbsp;
+                <span id="table-vfd-actual" style="color:#4fc3f7">—</span> VFD Hz×10 actual
+            </div>
+            <div class="unit" style="margin-top:4px; color:#666;">
+                command: <span id="table-vfd-command">—</span> Hz×10 &nbsp;|&nbsp;
+                <span id="table-revs-value" title="realTableSpeed — may hold last value after stop">—</span> rev/s (PLC calc, may lag on stop)
             </div>
         </div>
 
@@ -1640,7 +1643,7 @@ function drawChart() {
     }
     const [tMn,tMx]=getRange(tableSpeedArr);
     drawBackground(0); drawLine(0,tableSpeedArr,'#4fc3f7',tMn,tMx);
-    labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed (rpm)','#4fc3f7');
+    labelY(0,tMn,tMx,'#4fc3f7'); labelPanel(0,'Table Speed — Actual (rpm)','#4fc3f7');
     const [pMn,pMx]=getRange(pullerSpeedArr);
     drawBackground(1); drawLine(1,pullerSpeedArr,'#81c784',pMn,pMx);
     labelY(1,pMn,pMx,'#81c784'); labelPanel(1,'Puller Speed (in/s)','#81c784');
@@ -1794,12 +1797,12 @@ async function fetchAndUpdate() {
     try {
         const res  = await fetch('/api/latest');
         const data = await res.json();
-        const now  = new Date().toLocaleTimeString('en-US',{hour12:false});
-        const ts   = data.table_speed  || 0;
-        const ps   = data.puller_speed || 0;
-        const sr   = data.speed_ratio  || null;
-        const wb   = data.wire_break_bits;
-        const st   = data.machine_state;
+        const now    = new Date().toLocaleTimeString('en-US',{hour12:false});
+        const vfdAct = data.vfd_freq_actual || 0;
+        const ps     = data.puller_speed || 0;
+        const sr     = data.speed_ratio  || null;
+        const wb     = data.wire_break_bits;
+        const st     = data.machine_state;
 
         // Stale detection
         let isStale = false;
@@ -1809,8 +1812,8 @@ async function fetchAndUpdate() {
             if (timestampAgeTicks >= 5 || !data.connected) isStale = true;
         } else { isStale = true; }
 
-        // Rolling arrays — table speed converted to RPM for chart
-        tableSpeedArr.shift();   tableSpeedArr.push(isStale ? null : (ts ? ts * 60 : 0));
+        // Rolling arrays — table speed (rpm) derived from VFD_Freq_Actual, always truthful
+        tableSpeedArr.shift();   tableSpeedArr.push(isStale ? null : (vfdAct * 0.0355));
         pullerSpeedArr.shift();  pullerSpeedArr.push(isStale ? null : ps);
         speedRatioArr.shift();   speedRatioArr.push(isStale ? null : sr);
         timestampsArr.shift();   timestampsArr.push(now);
@@ -1833,14 +1836,21 @@ async function fetchAndUpdate() {
 
         // Production / process cards
         upd('feet-value',      data.puller_pos_feet  ? data.puller_pos_feet.toFixed(2)  : '—');
-        // Table speed card — VFD as primary, RPM from realTableSpeed, raw rev/s secondary
-        const vfdRaw = data.vfd_freq_actual;
-        const tableRevs = data.table_speed;
-        const tableRpm = tableRevs ? (tableRevs * 60).toFixed(1) : null;
+        // Table speed card — RPM derived from VFD_Freq_Actual (always truthful, zeroes on stop).
+        // Ratio derived empirically: rpm = VFD_Freq_Actual(Hz x10) * 0.0355
+        // (confirmed: 4788 -> 170.0 rpm, 4225 -> 150.0 rpm)
+        const VFD_TO_RPM = 0.0355;
+        const vfdActualRaw  = data.vfd_freq_actual;
+        const vfdCommandRaw = data.vfd_freq_command;
+        const tableRpmActual = (vfdActualRaw != null) ? (vfdActualRaw * VFD_TO_RPM).toFixed(1) : null;
+        const tableRevs = data.table_speed;  // realTableSpeed — may lag/hold on stop
+
         const tableEl = document.getElementById('table-value');
-        if (tableEl) tableEl.textContent = isStale ? '—' : (vfdRaw != null ? vfdRaw : '—');
-        const rpmEl = document.getElementById('table-rpm-value');
-        if (rpmEl) rpmEl.textContent = (!isStale && tableRpm) ? tableRpm : '—';
+        if (tableEl) tableEl.textContent = isStale ? '—' : (tableRpmActual != null ? tableRpmActual : '0');
+        const vfdActEl = document.getElementById('table-vfd-actual');
+        if (vfdActEl) vfdActEl.textContent = (!isStale && vfdActualRaw != null) ? vfdActualRaw : '—';
+        const vfdCmdEl = document.getElementById('table-vfd-command');
+        if (vfdCmdEl) vfdCmdEl.textContent = (!isStale && vfdCommandRaw != null) ? vfdCommandRaw : '—';
         const revsEl = document.getElementById('table-revs-value');
         if (revsEl) revsEl.textContent = (!isStale && tableRevs) ? tableRevs.toFixed(4) : '—';
         upd('puller-value',    ps ? ps.toFixed(4) : '—');
