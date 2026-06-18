@@ -320,6 +320,26 @@ HIRES_TAGS = [
     'I_Emergency_Stop_Ok',
     'Program:MainProgram.Fault_WireBreak',
     'Program:MainProgram.Fault_EStop',
+    # Added after live verification (confirmed actively changing on puller axis;
+    # TorqueReference moved 28/29 polls vs. flat OutputCurrent in the same sample) —
+    # candidate for an earlier-than-velocity-error wire-break precursor signal.
+    'servoPuller_Axis.TorqueReference',
+    'Program:P02_PullerServo.ServoStatus.FilteredTorque',
+    'Program:P02_PullerServo.ServoStatus.Motor_RPM',
+    # Fault/alarm bits — cannot be evaluated by steady-state sampling since they're
+    # designed to stay False except during an actual fault. Added cheaply here so the
+    # next several real wire-break events in hires_events provide the real ML-relevance
+    # test (did any of these fire in the pre/post window?) rather than guessing in advance.
+    'servoPuller_Axis.ExcessivePositionErrorFault',
+    'servoPuller_Axis.ExcessiveVelocityErrorFault',
+    'servoPuller_Axis.OvertorqueLimitFault',
+    'servoPuller_Axis.UndertorqueLimitFault',
+    'servoPuller_Axis.AxisFault',
+    'servoPuller_Axis.MotionFaultStatus',
+    'Program:MainProgram.Fault_SERCOS',
+    'Program:MainProgram.Fault_StartingTimeout',
+    'Program:MainProgram.Table_Drive_Fault',
+    'Program:P02_PullerServo.Servo_Axis_Faults',
 ]
 
 
