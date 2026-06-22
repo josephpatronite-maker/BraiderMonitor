@@ -2547,9 +2547,9 @@ def api_floor_data():
     elif range_param == 'lastweek':
         this_monday = today - timedelta(days=today.weekday())
         last_monday = this_monday - timedelta(days=7)
-        last_sunday = this_monday - timedelta(days=1)
+        last_friday = last_monday + timedelta(days=4)
         cutoff_start = last_monday.isoformat()
-        cutoff_end   = last_sunday.isoformat() + 'T23:59:59'
+        cutoff_end   = last_friday.isoformat() + 'T23:59:59'
         def row_matches(ts_): return cutoff_start <= ts_ <= cutoff_end
     else:
         today_str = today.isoformat()
@@ -2585,7 +2585,7 @@ def api_floor_data():
         t = r.get('Timestamp','')
         if t not in seen_ts: seen_ts.add(t); deduped.append(r)
 
-    step = 10 if range_param == 'week' else 1
+    step = 10 if range_param in ('week', 'lastweek') else 1
     matching = deduped[::step]
     timestamps_, table_speed_, puller_speed_, speed_ratio_, states_ = [], [], [], [], []
     for row in matching:
