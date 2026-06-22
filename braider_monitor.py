@@ -408,9 +408,10 @@ def _run_archive_checks(now: datetime):
     archived_any = False
 
     if is_sunday_midnight:
-        week_label = now.strftime('%Y_%m_%d')
         if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
-            archive_name = PROCESS_LOG.replace('.csv', f'_week_ending_{week_label}.csv')
+            archive_name = PROCESS_LOG.replace(
+                '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
+            )
             try:
                 os.rename(PROCESS_LOG, archive_name)
                 log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} → {os.path.basename(archive_name)}')
@@ -419,10 +420,11 @@ def _run_archive_checks(now: datetime):
                 log.error(f'Weekly archive failed: {e}')
 
     if is_monthstart_midnight:
-        month_label = now.strftime('%Y_%m')
         for filepath in [EVENT_LOG, OEE_LOG, WIRE_BREAK_LOG]:
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                archive_name = filepath.replace('.csv', f'_{month_label}.csv')
+                archive_name = filepath.replace(
+                    '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
+                )
                 try:
                     os.rename(filepath, archive_name)
                     log.info(f'Monthly archive: {os.path.basename(filepath)} → {os.path.basename(archive_name)}')
