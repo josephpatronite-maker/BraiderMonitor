@@ -2655,21 +2655,35 @@ def get_remote_braider_stats(host, braider_id):
     percentage breakdown that calculate_daily_state_percentages() produces locally,
     using only today's rows from its process_log (read remotely, no files written).
     Falls back to {'online': False} on any connection or parsing failure.
+
+    Requires passwordless (key-based) SSH from this Pi to `host` as user `pi`.
+    BatchMode=yes ensures we fail fast instead of hanging on a password prompt
+    if the key isn't set up yet.
     """
     import subprocess
     try:
         today_str = datetime.now().strftime('%Y-%m-%d')
         remote_path = f'~/braider_logs/{braider_id}_process_log.csv'
-        # grep today's rows remotely so we don't pull the whole file over SSH
-        cmd = f"ssh -o ConnectTimeout=3 pi@{host} \"grep '^{today_str}' {remote_path}\""
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+        ssh_opts = '-o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new'
 
-        if result.returncode != 0 or not result.stdout.strip():
+        cmd = f"ssh {ssh_opts} pi@{host} \"grep '^{today_str}' {remote_path}\""
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
+
+        if result.returncode != 0:
+            log.warning(f'[{braider_id}] SSH to {host} failed (code {result.returncode}): {result.stderr.strip()}')
             return {'online': False, 'state': 'Offline', 'pcts': {}}
 
+        if not result.stdout.strip():
+            log.warning(f'[{braider_id}] SSH to {host} succeeded but no rows matched today ({today_str})')
+            return {'online': False, 'state': 'No Data Today', 'pcts': {}}
+
         # Need the header separately since grep on today's rows won't include it
-        header_cmd = f"ssh -o ConnectTimeout=3 pi@{host} \"head -1 {remote_path}\""
-        header_result = subprocess.run(header_cmd, shell=True, capture_output=True, text=True, timeout=5)
+        header_cmd = f"ssh {ssh_opts} pi@{host} \"head -1 {remote_path}\""
+        header_result = subprocess.run(header_cmd, shell=True, capture_output=True, text=True, timeout=6)
+        if header_result.returncode != 0:
+            log.warning(f'[{braider_id}] SSH header read failed: {header_result.stderr.strip()}')
+            return {'online': False, 'state': 'Offline', 'pcts': {}}
+
         headers = header_result.stdout.strip().split(',')
         state_col = headers.index('State_Name') if 'State_Name' in headers else 3
 
@@ -2690,8 +2704,11 @@ def get_remote_braider_stats(host, braider_id):
         pcts = {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
         return {'online': True, 'state': last_state, 'pcts': pcts}
 
+    except subprocess.TimeoutExpired:
+        log.warning(f'[{braider_id}] SSH to {host} timed out')
+        return {'online': False, 'state': 'Offline', 'pcts': {}}
     except Exception as e:
-        log.error(f'Error reading {braider_id} via SSH from {host}: {e}')
+        log.error(f'[{braider_id}] Error reading via SSH from {host}: {e}')
         return {'online': False, 'state': 'Offline', 'pcts': {}}
  
  
