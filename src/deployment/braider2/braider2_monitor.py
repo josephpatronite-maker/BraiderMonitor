@@ -2609,89 +2609,90 @@ def api_floor_data():
 def home_hub():
     """Hub page linking to both braider dashboards."""
     try:
-        # Get latest data from local CSV for Braider 2
-        braider2_data = get_latest_braider_stats('/home/pi/braider_logs', 'Braider_2')
-        
-        # Try to get Braider 1 data (optional - if fails, just show offline)
-        try:
-            import subprocess
-            result = subprocess.run(
-                "ssh pi@braider1.local 'tail -5 ~/braider_logs/Braider_1_process_log.csv' 2>/dev/null",
-                shell=True, capture_output=True, text=True, timeout=3
-            )
-            if result.returncode == 0:
-                braider1_data = parse_braider_csv(result.stdout, 'Braider_1')
-            else:
-                braider1_data = {'online': False, 'state': 'Offline', 'utilization': 0}
-        except:
-            braider1_data = {'online': False, 'state': 'Offline', 'utilization': 0}
-        
+        # Braider 2 — local data, same source the main dashboard's pie uses
+        with _lock:
+            braider2_online = bool(_latest.get('connected'))
+            braider2_state  = _latest.get('state_name') or 'Unknown'
+        braider2_pcts = calculate_daily_state_percentages()
+        braider2_util = round(braider2_pcts.get('RUNNING', 0), 1)
+
+        # Braider 1 — read over SSH, same calculation logic applied remotely
+        braider1_data = get_remote_braider_stats('braider1.local', 'Braider_1')
+        braider1_online = braider1_data.get('online', False)
+        braider1_state  = braider1_data.get('state', 'Offline')
+        braider1_pcts   = braider1_data.get('pcts', {})
+        braider1_util   = round(braider1_pcts.get('RUNNING', 0), 1)
+
+        # Combined average utilization (only across machines currently online;
+        # if both are offline, show 0 rather than dividing by zero)
+        online_utils = []
+        if braider1_online:
+            online_utils.append(braider1_util)
+        if braider2_online:
+            online_utils.append(braider2_util)
+        avg_util = round(sum(online_utils) / len(online_utils), 1) if online_utils else 0.0
+
         return render_template_string(HOME_HUB_HTML,
-            braider1_online=braider1_data.get('online', False),
-            braider1_state=braider1_data.get('state', 'Unknown'),
-            braider1_util=braider1_data.get('utilization', 0),
-            
-            braider2_online=braider2_data.get('online', False),
-            braider2_state=braider2_data.get('state', 'Unknown'),
-            braider2_util=braider2_data.get('utilization', 0),
-            
+            braider1_online=braider1_online,
+            braider1_state=braider1_state,
+            braider1_pcts=braider1_pcts,
+
+            braider2_online=braider2_online,
+            braider2_state=braider2_state,
+            braider2_pcts=braider2_pcts,
+
+            avg_util=avg_util,
             current_time=datetime.now().strftime('%I:%M %p')
         )
     except Exception as e:
         log.error(f'Home hub error: {e}')
         return f'<h1>Error loading home page</h1><p>{e}</p>', 500
- 
- 
-def get_latest_braider_stats(log_path, braider_name):
-    """Extract latest stats from braider's CSV logs."""
+
+
+def get_remote_braider_stats(host, braider_id):
+    """
+    SSH into another braider's Pi and compute the same daily RUNNING/STOPPED/etc.
+    percentage breakdown that calculate_daily_state_percentages() produces locally,
+    using only today's rows from its process_log (read remotely, no files written).
+    Falls back to {'online': False} on any connection or parsing failure.
+    """
+    import subprocess
     try:
-        import pandas as pd
-        process_log = os.path.join(log_path, f'{braider_name}_process_log.csv')
-        
-        if not os.path.exists(process_log):
-            return {'online': False, 'state': 'No Logs', 'utilization': 0}
-        
-        # Read last 20 rows
-        df = pd.read_csv(process_log, tail=20)
-        latest = df.iloc[-1]
-        
-        # Calculate utilization
-        state_counts = df['Machine_State'].value_counts()
-        running = state_counts.get('Running', 0)
-        utilization = int((running / len(df)) * 100)
-        
-        return {
-            'online': True,
-            'state': str(latest.get('Machine_State', 'Unknown')),
-            'utilization': utilization
-        }
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        remote_path = f'~/braider_logs/{braider_id}_process_log.csv'
+        # grep today's rows remotely so we don't pull the whole file over SSH
+        cmd = f"ssh -o ConnectTimeout=3 pi@{host} \"grep '^{today_str}' {remote_path}\""
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+
+        if result.returncode != 0 or not result.stdout.strip():
+            return {'online': False, 'state': 'Offline', 'pcts': {}}
+
+        # Need the header separately since grep on today's rows won't include it
+        header_cmd = f"ssh -o ConnectTimeout=3 pi@{host} \"head -1 {remote_path}\""
+        header_result = subprocess.run(header_cmd, shell=True, capture_output=True, text=True, timeout=5)
+        headers = header_result.stdout.strip().split(',')
+        state_col = headers.index('State_Name') if 'State_Name' in headers else 3
+
+        state_counts = {}
+        total_rows = 0
+        last_state = 'Unknown'
+        for line in result.stdout.strip().split('\n'):
+            parts = line.split(',')
+            if len(parts) > state_col:
+                sname = parts[state_col].strip() or 'UNKNOWN'
+                state_counts[sname] = state_counts.get(sname, 0) + 1
+                total_rows += 1
+                last_state = sname
+
+        if total_rows == 0:
+            return {'online': False, 'state': 'No Data', 'pcts': {}}
+
+        pcts = {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
+        return {'online': True, 'state': last_state, 'pcts': pcts}
+
     except Exception as e:
-        log.error(f'Error getting stats for {braider_name}: {e}')
-        return {'online': False, 'state': 'Error', 'utilization': 0}
- 
- 
-def parse_braider_csv(csv_text, braider_name):
-    """Parse CSV text from SSH output."""
-    try:
-        import pandas as pd
-        from io import StringIO
-        
-        df = pd.read_csv(StringIO(csv_text))
-        if len(df) == 0:
-            return {'online': False, 'state': 'No Data', 'utilization': 0}
-        
-        latest = df.iloc[-1]
-        state_counts = df['Machine_State'].value_counts()
-        running = state_counts.get('Running', 0)
-        utilization = int((running / len(df)) * 100)
-        
-        return {
-            'online': True,
-            'state': str(latest.get('Machine_State', 'Unknown')),
-            'utilization': utilization
-        }
-    except:
-        return {'online': False, 'state': 'Unavailable', 'utilization': 0}
+        log.error(f'Error reading {braider_id} via SSH from {host}: {e}')
+        return {'online': False, 'state': 'Offline', 'pcts': {}}
  
  
 # ============================================================================
@@ -2716,7 +2717,7 @@ HOME_HUB_HTML = '''
 
         .hub-grid {
             display:grid;
-            grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));
             gap:12px;
             margin-bottom:20px;
         }
@@ -2757,28 +2758,23 @@ HOME_HUB_HTML = '''
             border-bottom: 1px solid #333;
             font-size: 12px;
         }
-        .stat-row:last-of-type { border-bottom: none; }
 
         .stat-label { color: #888; text-transform:uppercase; font-size:9px; letter-spacing:1px; }
         .stat-value { color: #e0e0e0; font-weight: bold; }
 
-        .utilization-bar { margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; }
-        .bar-label {
-            font-size: 9px; color: #888; font-weight: bold;
-            text-transform:uppercase; letter-spacing:1px; margin-bottom: 4px;
-        }
-        .bar-container {
-            width: 100%; height: 14px; background: #1a1a1a;
-            border-radius: 7px; overflow: hidden; position: relative; border: 1px solid #333;
-        }
-        .bar-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #4fc3f7 0%, #81d4fa 100%);
-            display: flex; align-items: center; justify-content: center;
-            color: #1a1a1a; font-size: 9px; font-weight: bold; transition: width 0.5s ease;
+        .pie-row {
+            display:flex; align-items:center; gap:14px; margin-top:10px;
         }
 
-        .button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+        .pie-value {
+            font-size:22px; font-weight:bold; margin-bottom:4px;
+        }
+
+        .pie-legend {
+            font-size:10px; line-height:1.6; color:#aaa;
+        }
+
+        .button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
         .btn {
             padding: 6px 10px; border: none; border-radius: 4px; font-size: 11px;
             font-weight: bold; cursor: pointer; text-decoration: none; display: inline-block;
@@ -2790,22 +2786,18 @@ HOME_HUB_HTML = '''
         .btn-secondary { background: #333; color: #4fc3f7; border: 1px solid #4fc3f7; }
         .btn-secondary:hover { background: #4fc3f7; color: #1a1a1a; }
 
-        .summary-box {
+        .avg-card {
             background:#2a2a2a; border-radius:8px; padding:14px;
             margin-bottom:20px; border-left:3px solid #4fc3f7;
+            display:flex; align-items:center; gap:18px;
         }
-        .summary-title {
-            font-size: 11px; font-weight: bold; color: #4fc3f7;
-            text-transform:uppercase; letter-spacing:2px; margin-bottom: 12px;
+        .avg-label {
+            font-size: 11px; font-weight: bold; color: #888;
+            text-transform:uppercase; letter-spacing:2px;
         }
-
-        .quick-links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-        .quick-link {
-            padding: 8px; background: #1a1a1a; border-radius: 4px; text-decoration: none;
-            color: #4fc3f7; font-weight: bold; font-size: 11px; border-left: 2px solid #4fc3f7;
-            transition: all 0.2s; text-align: center; text-transform:uppercase; letter-spacing:1px;
+        .avg-value {
+            font-size: 32px; font-weight: bold; color: #4fc3f7;
         }
-        .quick-link:hover { background: #4fc3f7; color: #1a1a1a; }
 
         .footer {
             text-align: center; color: #888; font-size: 10px;
@@ -2814,7 +2806,7 @@ HOME_HUB_HTML = '''
 
         @media (max-width: 768px) {
             .hub-grid { grid-template-columns: 1fr; }
-            .quick-links { grid-template-columns: 1fr; }
+            .pie-row { flex-direction:column; align-items:flex-start; }
         }
     </style>
 </head>
@@ -2824,6 +2816,12 @@ HOME_HUB_HTML = '''
         <div class="sub">
             Production monitoring hub &nbsp;|&nbsp;
             Updated: {{ current_time }}
+        </div>
+
+        <div class="section">Combined</div>
+        <div class="avg-card">
+            <div class="avg-label">Average Utilization<br>(Today, both braiders)</div>
+            <div class="avg-value">{{ avg_util }}%</div>
         </div>
 
         <div class="section">Active Braiders</div>
@@ -2842,12 +2840,11 @@ HOME_HUB_HTML = '''
                     <span class="stat-value">{{ braider1_state }}</span>
                 </div>
 
-                <div class="utilization-bar">
-                    <div class="bar-label">Utilization</div>
-                    <div class="bar-container">
-                        <div class="bar-fill" style="width: {{ braider1_util }}%">
-                            {{ braider1_util }}%
-                        </div>
+                <div class="pie-row">
+                    <canvas id="pie1" width="90" height="90"></canvas>
+                    <div>
+                        <div class="pie-value" id="pie1-value">—</div>
+                        <div class="pie-legend" id="pie1-legend"></div>
                     </div>
                 </div>
 
@@ -2871,12 +2868,11 @@ HOME_HUB_HTML = '''
                     <span class="stat-value">{{ braider2_state }}</span>
                 </div>
 
-                <div class="utilization-bar">
-                    <div class="bar-label">Utilization</div>
-                    <div class="bar-container">
-                        <div class="bar-fill" style="width: {{ braider2_util }}%">
-                            {{ braider2_util }}%
-                        </div>
+                <div class="pie-row">
+                    <canvas id="pie2" width="90" height="90"></canvas>
+                    <div>
+                        <div class="pie-value" id="pie2-value">—</div>
+                        <div class="pie-legend" id="pie2-legend"></div>
                     </div>
                 </div>
 
@@ -2887,20 +2883,61 @@ HOME_HUB_HTML = '''
             </div>
         </div>
 
-        <div class="section">Quick Access</div>
-        <div class="summary-box">
-            <div class="quick-links">
-                <a href="http://braider1.local:5000" class="quick-link" target="_blank">Braider 1 Live</a>
-                <a href="http://braider1.local:5000/floor" class="quick-link" target="_blank">Braider 1 Report</a>
-                <a href="http://braider2.local:5000" class="quick-link" target="_blank">Braider 2 Live</a>
-                <a href="http://braider2.local:5000/floor" class="quick-link" target="_blank">Braider 2 Report</a>
-            </div>
-        </div>
-
         <div class="footer">
-            Bookmark <strong>braider2.local:5000/home</strong> for quick access to all dashboards
+            Bookmark <strong>braider2.local:5000/home</strong> for quick access
         </div>
     </div>
+
+    <script>
+        // Same color map and drawing logic as the main dashboard's OEE pie
+        const stateColors = {
+            'RUNNING':'#66bb6a','READY':'#4fc3f7','STOPPED':'#ef5350',
+            'PAUSED':'#ffa726','OFF':'#78909c','ABORTED':'#b71c1c','UNKNOWN':'#555'
+        };
+
+        function drawHubPie(canvasId, valueId, legendId, pcts) {
+            const valueEl  = document.getElementById(valueId);
+            const legendEl = document.getElementById(legendId);
+            const canvas   = document.getElementById(canvasId);
+            if (!pcts || !Object.keys(pcts).length) {
+                if (valueEl)  valueEl.textContent = '—';
+                if (legendEl) legendEl.textContent = 'No data';
+                return;
+            }
+            const runningPct = pcts['RUNNING'] || 0;
+            if (valueEl) {
+                valueEl.textContent = runningPct.toFixed(1) + '%';
+                valueEl.style.color = runningPct>=50 ? '#66bb6a' : runningPct>=25 ? '#ffa726' : '#ef5350';
+            }
+            if (legendEl) {
+                legendEl.innerHTML = Object.entries(pcts).map(([s,p]) =>
+                    `<div><span style="display:inline-block;width:8px;height:8px;background:${stateColors[s]||'#999'};margin-right:4px;border-radius:2px;"></span>${s}: ${p}%</div>`
+                ).join('');
+            }
+            if (canvas) {
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0,0,90,90);
+                const cx=45, cy=45, r=40;
+                let angle = -Math.PI/2;
+                for (const [s,p] of Object.entries(pcts)) {
+                    if (p<=0) continue;
+                    const sweep = (p/100)*(2*Math.PI);
+                    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,angle,angle+sweep);
+                    ctx.closePath(); ctx.fillStyle = stateColors[s]||'#999'; ctx.fill();
+                    ctx.strokeStyle='#1a1a1a'; ctx.lineWidth=1.5; ctx.stroke();
+                    angle += sweep;
+                }
+                ctx.beginPath(); ctx.arc(cx,cy,r*0.52,0,Math.PI*2);
+                ctx.fillStyle='#2a2a2a'; ctx.fill();
+            }
+        }
+
+        drawHubPie('pie1', 'pie1-value', 'pie1-legend', {{ braider1_pcts | tojson }});
+        drawHubPie('pie2', 'pie2-value', 'pie2-legend', {{ braider2_pcts | tojson }});
+
+        // Auto-refresh every 30 seconds so SSH-fetched Braider 1 data stays current
+        setTimeout(() => location.reload(), 30000);
+    </script>
 </body>
 </html>
 '''
