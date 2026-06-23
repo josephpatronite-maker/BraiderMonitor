@@ -1,0 +1,17 @@
+[Unit]
+Description=Braider 1 Monitor
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/BraiderMonitor/src/deployment/braider1
+ExecStart=/usr/bin/python3 /home/pi/BraiderMonitor/src/deployment/braider1/braider1_monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
