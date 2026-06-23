@@ -1,7 +1,12 @@
 """
-braider_monitor.py
+braider_monitor.py  (Braider 1 instance)
 Noble Gas Systems — Steeger HS120/48 IMC-7K Braider Monitor
 Raspberry Pi production logger — runs as a systemd service
+
+NOTE: This is the Braider 1 deployment, adapted from the Braider 2 monitor.
+Tag lists (FAST_TAGS / OEE_TAGS / CHANGE_TAGS / HIRES_TAGS) are assumed
+identical to Braider 2 pending on-site confirmation — see TAG VERIFICATION
+note below before trusting any log output.
 
 Logs:
   - process_log.csv           : 2s poll, full telemetry
@@ -33,8 +38,8 @@ from flask import Flask, jsonify, render_template_string
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-PLC_IP     = '192.168.1.102'
-BRAIDER_ID = 'Braider_2'
+PLC_IP     = '192.168.1.102'   # <-- SET THIS after on-site discovery (see connection guide, Step 2)
+BRAIDER_ID = 'Braider_1'
 
 LOG_DIR      = os.path.expanduser('~/braider_logs')
 HIRES_LOG_DIR = os.path.join(LOG_DIR, 'hires_events')
@@ -120,6 +125,20 @@ def decode_io_str(value):
     return ', '.join(labels) if labels else 'NONE'
 
 # ── Tag lists ─────────────────────────────────────────────────────────────────
+#
+# *** BRAIDER 1 TAG VERIFICATION — DO NOT SKIP ***
+# These four lists were carried over verbatim from the Braider 2 script on the
+# assumption that Braider 1 (same HS120/48 IMC-7K model) exposes an identical
+# tag set. Before trusting any logged data:
+#   1. Run get_tags.py (or `plc.get_tag_list()`) against Braider 1's PLC once
+#      its IP is confirmed (see connection guide Step 2-3).
+#   2. Diff the resulting tag list against every tag name below — pay special
+#      attention to the typo'd 'WIre_Break_Detected' and the colon-syntax
+#      module tags ('Local:1:I.Data', 'Table_Drive:I.OutputFreq', etc.), since
+#      slot/module numbering can differ machine-to-machine.
+#   3. Fix any mismatches here BEFORE running this in production — a silently
+#      wrong tag name just reads as None/error from pycomm3, so logs may look
+#      populated while being wrong or empty for that one field.
 #
 # FAST_TAGS — 2s process telemetry written to process_log.csv
 # Only true process signals that change frequently during production.
@@ -408,10 +427,9 @@ def _run_archive_checks(now: datetime):
     archived_any = False
 
     if is_sunday_midnight:
+        week_label = now.strftime('%Y_%m_%d')
         if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
-            archive_name = PROCESS_LOG.replace(
-                '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
-            )
+            archive_name = PROCESS_LOG.replace('.csv', f'_week_ending_{week_label}.csv')
             try:
                 os.rename(PROCESS_LOG, archive_name)
                 log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} → {os.path.basename(archive_name)}')
@@ -420,11 +438,10 @@ def _run_archive_checks(now: datetime):
                 log.error(f'Weekly archive failed: {e}')
 
     if is_monthstart_midnight:
+        month_label = now.strftime('%Y_%m')
         for filepath in [EVENT_LOG, OEE_LOG, WIRE_BREAK_LOG]:
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                archive_name = filepath.replace(
-                    '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
-                )
+                archive_name = filepath.replace('.csv', f'_{month_label}.csv')
                 try:
                     os.rename(filepath, archive_name)
                     log.info(f'Monthly archive: {os.path.basename(filepath)} → {os.path.basename(archive_name)}')
@@ -2217,7 +2234,7 @@ FLOOR_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Braider 2 — Floor Report</title>
+<title>{{ braider_label }} — Floor Report</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background:#0d1117; color:#e6edf3; font-family:'Segoe UI',Arial,sans-serif; padding:20px; }
@@ -2250,7 +2267,7 @@ tr:hover td { background:#161b22; }
 </head>
 <body>
 
-<h1>Braider 2 — Daily Performance</h1>
+<h1>{{ braider_label }} — Daily Performance</h1>
 <div class="subtitle">{{ d.date }} &nbsp;·&nbsp; {{ d.total_hrs }}h logged today &nbsp;·&nbsp; <span id="last-refresh" style="color:#58a6ff;">Loading...</span></div>
 
 <div class="scorecard">
@@ -2380,7 +2397,7 @@ tr:hover td { background:#161b22; }
 </div>
 {% endif %}
 
-<div class="footer">Braider 2 · :5000/floor · Refreshes every 60s · Noble Gas Systems</div>
+<div class="footer">{{ braider_label }} · :5000/floor · Refreshes every 60s · Noble Gas Systems</div>
 
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script>
@@ -2531,7 +2548,8 @@ setInterval(updateFloor, 60000);
 @app.route('/floor')
 def floor_report():
     d = get_floor_report_data()
-    return render_template_string(FLOOR_HTML, d=type('D', (), d)())
+    return render_template_string(FLOOR_HTML, d=type('D', (), d)(),
+                                   braider_label=BRAIDER_ID.replace('_', ' '))
 
 
 @app.route('/api/floor_data')
@@ -2549,9 +2567,9 @@ def api_floor_data():
     elif range_param == 'lastweek':
         this_monday = today - timedelta(days=today.weekday())
         last_monday = this_monday - timedelta(days=7)
-        last_friday = last_monday + timedelta(days=4)
+        last_sunday = this_monday - timedelta(days=1)
         cutoff_start = last_monday.isoformat()
-        cutoff_end   = last_friday.isoformat() + 'T23:59:59'
+        cutoff_end   = last_sunday.isoformat() + 'T23:59:59'
         def row_matches(ts_): return cutoff_start <= ts_ <= cutoff_end
     else:
         today_str = today.isoformat()
@@ -2587,7 +2605,7 @@ def api_floor_data():
         t = r.get('Timestamp','')
         if t not in seen_ts: seen_ts.add(t); deduped.append(r)
 
-    step = 10 if range_param in ('week', 'lastweek') else 1
+    step = 10 if range_param == 'week' else 1
     matching = deduped[::step]
     timestamps_, table_speed_, puller_speed_, speed_ratio_, states_ = [], [], [], [], []
     for row in matching:
