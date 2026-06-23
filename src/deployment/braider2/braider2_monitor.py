@@ -2605,6 +2605,306 @@ def api_floor_data():
     return jsonify({'timestamps':timestamps_,'table_speed':table_speed_,
                     'puller_speed':puller_speed_,'speed_ratio':speed_ratio_,'states':states_})
 
+@app.route('/home')
+def home_hub():
+    """Hub page linking to both braider dashboards."""
+    try:
+        # Get latest data from local CSV for Braider 2
+        braider2_data = get_latest_braider_stats('/home/pi/braider_logs', 'Braider_2')
+        
+        # Try to get Braider 1 data (optional - if fails, just show offline)
+        try:
+            import subprocess
+            result = subprocess.run(
+                "ssh pi@braider1.local 'tail -5 ~/braider_logs/Braider_1_process_log.csv' 2>/dev/null",
+                shell=True, capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0:
+                braider1_data = parse_braider_csv(result.stdout, 'Braider_1')
+            else:
+                braider1_data = {'online': False, 'state': 'Offline', 'utilization': 0}
+        except:
+            braider1_data = {'online': False, 'state': 'Offline', 'utilization': 0}
+        
+        return render_template_string(HOME_HUB_HTML,
+            braider1_online=braider1_data.get('online', False),
+            braider1_state=braider1_data.get('state', 'Unknown'),
+            braider1_util=braider1_data.get('utilization', 0),
+            
+            braider2_online=braider2_data.get('online', False),
+            braider2_state=braider2_data.get('state', 'Unknown'),
+            braider2_util=braider2_data.get('utilization', 0),
+            
+            current_time=datetime.now().strftime('%I:%M %p')
+        )
+    except Exception as e:
+        log.error(f'Home hub error: {e}')
+        return f'<h1>Error loading home page</h1><p>{e}</p>', 500
+ 
+ 
+def get_latest_braider_stats(log_path, braider_name):
+    """Extract latest stats from braider's CSV logs."""
+    try:
+        import pandas as pd
+        process_log = os.path.join(log_path, f'{braider_name}_process_log.csv')
+        
+        if not os.path.exists(process_log):
+            return {'online': False, 'state': 'No Logs', 'utilization': 0}
+        
+        # Read last 20 rows
+        df = pd.read_csv(process_log, tail=20)
+        latest = df.iloc[-1]
+        
+        # Calculate utilization
+        state_counts = df['Machine_State'].value_counts()
+        running = state_counts.get('Running', 0)
+        utilization = int((running / len(df)) * 100)
+        
+        return {
+            'online': True,
+            'state': str(latest.get('Machine_State', 'Unknown')),
+            'utilization': utilization
+        }
+    except Exception as e:
+        log.error(f'Error getting stats for {braider_name}: {e}')
+        return {'online': False, 'state': 'Error', 'utilization': 0}
+ 
+ 
+def parse_braider_csv(csv_text, braider_name):
+    """Parse CSV text from SSH output."""
+    try:
+        import pandas as pd
+        from io import StringIO
+        
+        df = pd.read_csv(StringIO(csv_text))
+        if len(df) == 0:
+            return {'online': False, 'state': 'No Data', 'utilization': 0}
+        
+        latest = df.iloc[-1]
+        state_counts = df['Machine_State'].value_counts()
+        running = state_counts.get('Running', 0)
+        utilization = int((running / len(df)) * 100)
+        
+        return {
+            'online': True,
+            'state': str(latest.get('Machine_State', 'Unknown')),
+            'utilization': utilization
+        }
+    except:
+        return {'online': False, 'state': 'Unavailable', 'utilization': 0}
+ 
+ 
+# ============================================================================
+# HTML template with same styling as main dashboard
+# ============================================================================
+ 
+HOME_HUB_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Braider Hub — Noble Gas Systems</title>
+    <style>
+        body  { font-family: monospace; background:#1a1a1a; color:#e0e0e0; padding:20px; margin:0; }
+        h1    { color:#4fc3f7; margin-bottom:4px; font-size:28px; }
+        .sub  { color:#888; font-size:13px; margin-bottom:20px; }
+
+        .container { max-width:1200px; margin:0 auto; }
+
+        .section { font-size:11px; color:#555; text-transform:uppercase; letter-spacing:2px; margin:20px 0 8px; }
+
+        .hub-grid {
+            display:grid;
+            grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
+            gap:12px;
+            margin-bottom:20px;
+        }
+
+        .braider-card {
+            background:#2a2a2a;
+            border-radius:8px;
+            padding:14px;
+            border-left:3px solid #4fc3f7;
+        }
+
+        .card-header {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            margin-bottom:12px;
+            padding-bottom:8px;
+            border-bottom:1px solid #444;
+        }
+
+        .card-title { font-size: 18px; font-weight: bold; color: #4fc3f7; }
+
+        .status-badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform:uppercase;
+        }
+
+        .status-online  { background: #1b5e20; color: #66bb6a; }
+        .status-offline { background: #b71c1c; color: #ef9a9a; }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+        }
+        .stat-row:last-of-type { border-bottom: none; }
+
+        .stat-label { color: #888; text-transform:uppercase; font-size:9px; letter-spacing:1px; }
+        .stat-value { color: #e0e0e0; font-weight: bold; }
+
+        .utilization-bar { margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; }
+        .bar-label {
+            font-size: 9px; color: #888; font-weight: bold;
+            text-transform:uppercase; letter-spacing:1px; margin-bottom: 4px;
+        }
+        .bar-container {
+            width: 100%; height: 14px; background: #1a1a1a;
+            border-radius: 7px; overflow: hidden; position: relative; border: 1px solid #333;
+        }
+        .bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4fc3f7 0%, #81d4fa 100%);
+            display: flex; align-items: center; justify-content: center;
+            color: #1a1a1a; font-size: 9px; font-weight: bold; transition: width 0.5s ease;
+        }
+
+        .button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+        .btn {
+            padding: 6px 10px; border: none; border-radius: 4px; font-size: 11px;
+            font-weight: bold; cursor: pointer; text-decoration: none; display: inline-block;
+            text-align: center; transition: all 0.2s; font-family: monospace;
+            text-transform:uppercase; letter-spacing:1px;
+        }
+        .btn-primary { background: #4fc3f7; color: #1a1a1a; }
+        .btn-primary:hover { background: #81d4fa; box-shadow: 0 0 8px rgba(79, 195, 247, 0.5); }
+        .btn-secondary { background: #333; color: #4fc3f7; border: 1px solid #4fc3f7; }
+        .btn-secondary:hover { background: #4fc3f7; color: #1a1a1a; }
+
+        .summary-box {
+            background:#2a2a2a; border-radius:8px; padding:14px;
+            margin-bottom:20px; border-left:3px solid #4fc3f7;
+        }
+        .summary-title {
+            font-size: 11px; font-weight: bold; color: #4fc3f7;
+            text-transform:uppercase; letter-spacing:2px; margin-bottom: 12px;
+        }
+
+        .quick-links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+        .quick-link {
+            padding: 8px; background: #1a1a1a; border-radius: 4px; text-decoration: none;
+            color: #4fc3f7; font-weight: bold; font-size: 11px; border-left: 2px solid #4fc3f7;
+            transition: all 0.2s; text-align: center; text-transform:uppercase; letter-spacing:1px;
+        }
+        .quick-link:hover { background: #4fc3f7; color: #1a1a1a; }
+
+        .footer {
+            text-align: center; color: #888; font-size: 10px;
+            margin-top: 20px; padding-top: 12px; border-top: 1px solid #333;
+        }
+
+        @media (max-width: 768px) {
+            .hub-grid { grid-template-columns: 1fr; }
+            .quick-links { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Braider Hub — Noble Gas Systems</h1>
+        <div class="sub">
+            Production monitoring hub &nbsp;|&nbsp;
+            Updated: {{ current_time }}
+        </div>
+
+        <div class="section">Active Braiders</div>
+        <div class="hub-grid">
+            <!-- Braider 1 Card -->
+            <div class="braider-card">
+                <div class="card-header">
+                    <div class="card-title">Braider 1</div>
+                    <div class="status-badge {% if braider1_online %}status-online{% else %}status-offline{% endif %}">
+                        {% if braider1_online %}Online{% else %}Offline{% endif %}
+                    </div>
+                </div>
+
+                <div class="stat-row">
+                    <span class="stat-label">State</span>
+                    <span class="stat-value">{{ braider1_state }}</span>
+                </div>
+
+                <div class="utilization-bar">
+                    <div class="bar-label">Utilization</div>
+                    <div class="bar-container">
+                        <div class="bar-fill" style="width: {{ braider1_util }}%">
+                            {{ braider1_util }}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <a href="http://braider1.local:5000" class="btn btn-primary" target="_blank">Dashboard</a>
+                    <a href="http://braider1.local:5000/floor" class="btn btn-secondary" target="_blank">Report</a>
+                </div>
+            </div>
+
+            <!-- Braider 2 Card -->
+            <div class="braider-card">
+                <div class="card-header">
+                    <div class="card-title">Braider 2</div>
+                    <div class="status-badge {% if braider2_online %}status-online{% else %}status-offline{% endif %}">
+                        {% if braider2_online %}Online{% else %}Offline{% endif %}
+                    </div>
+                </div>
+
+                <div class="stat-row">
+                    <span class="stat-label">State</span>
+                    <span class="stat-value">{{ braider2_state }}</span>
+                </div>
+
+                <div class="utilization-bar">
+                    <div class="bar-label">Utilization</div>
+                    <div class="bar-container">
+                        <div class="bar-fill" style="width: {{ braider2_util }}%">
+                            {{ braider2_util }}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <a href="http://braider2.local:5000" class="btn btn-primary" target="_blank">Dashboard</a>
+                    <a href="http://braider2.local:5000/floor" class="btn btn-secondary" target="_blank">Report</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">Quick Access</div>
+        <div class="summary-box">
+            <div class="quick-links">
+                <a href="http://braider1.local:5000" class="quick-link" target="_blank">Braider 1 Live</a>
+                <a href="http://braider1.local:5000/floor" class="quick-link" target="_blank">Braider 1 Report</a>
+                <a href="http://braider2.local:5000" class="quick-link" target="_blank">Braider 2 Live</a>
+                <a href="http://braider2.local:5000/floor" class="quick-link" target="_blank">Braider 2 Report</a>
+            </div>
+        </div>
+
+        <div class="footer">
+            Bookmark <strong>braider2.local:5000/home</strong> for quick access to all dashboards
+        </div>
+    </div>
+</body>
+</html>
+'''
+
 
 # ── Sleep prevention ──────────────────────────────────────────────────────────
 
