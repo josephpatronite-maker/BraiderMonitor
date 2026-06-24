@@ -2120,11 +2120,13 @@ def get_floor_report_data():
                     rows = [r for r in csv.DictReader(f) if r.get('Timestamp','').startswith(today)] + rows
             except Exception:
                 pass
-        seen = set(); deduped = []
-        for row in rows:
-            t = row.get('Timestamp','')
-            if t not in seen: seen.add(t); deduped.append(row)
-        return deduped
+        # NOTE: no timestamp-based dedup here. Archiving uses an atomic os.rename(),
+        # so a row can never legitimately appear in both the live file and an archive —
+        # any two rows sharing the same second-precision timestamp are distinct real
+        # samples (e.g. during a PLC reconnect burst), not duplicates. Dropping them
+        # by timestamp previously caused this function's running% to read lower than
+        # calculate_daily_state_percentages() (the pie chart), which performs no dedup.
+        return rows
 
     proc_rows  = read_today_rows(PROCESS_LOG, today_str)
     event_rows = read_today_rows(EVENT_LOG,   today_str)
