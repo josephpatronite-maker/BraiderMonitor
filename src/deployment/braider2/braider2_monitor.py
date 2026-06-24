@@ -59,10 +59,10 @@ HIRES_RING_SIZE = int(PRE_EVENT_SECONDS / HIRES_POLL_INTERVAL)  # 20 rows
 STARTUP_GRACE_SECONDS = 5
 
 STATE_CODES = {
-    1:   'OFF',
-    2:   'READY',
-    4:   'STOPPED',
-    8:   'STARTING',
+    0:   'OFF',
+    1:   'STOPPED',
+    2:   'STARTING',
+    4:   'READY',
     16:  'RUNNING',
     32:  'STOPPING',
     64:  'PAUSING',
@@ -535,10 +535,13 @@ def calculate_daily_state_percentages():
                         if len(parts) > state_col:
                             row_timestamp = parts[0]
                             if row_timestamp.startswith(today_str):
-                                sname = parts[state_col]
-                                if sname:
-                                    state_counts[sname] = state_counts.get(sname, 0) + 1
-                                    total_rows += 1
+                                # Treat a blank State_Name as UNKNOWN (counted in both
+                                # numerator and denominator) rather than silently excluding
+                                # the row from total_rows — matches /floor's accounting so
+                                # the two pages always agree on running %.
+                                sname = parts[state_col] or 'UNKNOWN'
+                                state_counts[sname] = state_counts.get(sname, 0) + 1
+                                total_rows += 1
                             else:
                                 done = True
                                 break
@@ -1049,7 +1052,7 @@ def monitor_loop():
 
                     if pending_oee:
                         pending_oee['Machine_State'] = machine_state
-                        pending_oee['State_Name']    = state_name(machine_state) if machine_state else ''
+                        pending_oee['State_Name']    = state_name(machine_state) if machine_state is not None else ''
                         write_csv_row(OEE_LOG, pending_oee)
 
                     # ── Process log row ──────────────────────────────────────
@@ -1057,7 +1060,7 @@ def monitor_loop():
                         'Timestamp':             timestamp,
                         'Braider_ID':            BRAIDER_ID,
                         'Machine_State':         machine_state,
-                        'State_Name':            state_name(machine_state) if machine_state else '',
+                        'State_Name':            state_name(machine_state) if machine_state is not None else '',
                         'Table_Speed':           round(table_speed, 6)  if table_speed  else None,
                         'Puller_Speed':          round(puller_speed, 6) if puller_speed else None,
                         'Speed_Ratio':           speed_ratio,
@@ -1185,7 +1188,7 @@ def monitor_loop():
                     if machine_state != prev_state and prev_state is not None:
                         _write_event(timestamp, 'STATE_CHANGE',
                                      from_val=state_name(prev_state),
-                                     to_val=state_name(machine_state) if machine_state else '',
+                                     to_val=state_name(machine_state) if machine_state is not None else '',
                                      from_code=prev_state,
                                      to_code=machine_state,
                                      puller_feet=puller_feet,
@@ -1251,7 +1254,7 @@ def monitor_loop():
                         _latest.update({
                             'timestamp':           timestamp,
                             'machine_state':       machine_state,
-                            'state_name':          state_name(machine_state) if machine_state else 'Unknown',
+                            'state_name':          state_name(machine_state) if machine_state is not None else 'Unknown',
                             'table_speed':         round(table_speed, 4)  if table_speed  else None,
                             'puller_speed':        round(puller_speed, 4) if puller_speed else None,
                             'speed_ratio':         speed_ratio,
