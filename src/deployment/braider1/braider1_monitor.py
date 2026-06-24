@@ -552,10 +552,13 @@ def calculate_daily_state_percentages():
                         if len(parts) > state_col:
                             row_timestamp = parts[0]
                             if row_timestamp.startswith(today_str):
-                                sname = parts[state_col]
-                                if sname:
-                                    state_counts[sname] = state_counts.get(sname, 0) + 1
-                                    total_rows += 1
+                                # Treat a blank State_Name as UNKNOWN (counted in both
+                                # numerator and denominator) rather than silently excluding
+                                # the row from total_rows — matches /floor's accounting so
+                                # the two pages always agree on running %.
+                                sname = parts[state_col] or 'UNKNOWN'
+                                state_counts[sname] = state_counts.get(sname, 0) + 1
+                                total_rows += 1
                             else:
                                 done = True
                                 break
@@ -1066,7 +1069,7 @@ def monitor_loop():
 
                     if pending_oee:
                         pending_oee['Machine_State'] = machine_state
-                        pending_oee['State_Name']    = state_name(machine_state) if machine_state else ''
+                        pending_oee['State_Name']    = state_name(machine_state) if machine_state is not None else ''
                         write_csv_row(OEE_LOG, pending_oee)
 
                     # ── Process log row ──────────────────────────────────────
@@ -1074,7 +1077,7 @@ def monitor_loop():
                         'Timestamp':             timestamp,
                         'Braider_ID':            BRAIDER_ID,
                         'Machine_State':         machine_state,
-                        'State_Name':            state_name(machine_state) if machine_state else '',
+                        'State_Name':            state_name(machine_state) if machine_state is not None else '',
                         'Table_Speed':           round(table_speed, 6)  if table_speed  else None,
                         'Puller_Speed':          round(puller_speed, 6) if puller_speed else None,
                         'Speed_Ratio':           speed_ratio,
@@ -1202,7 +1205,7 @@ def monitor_loop():
                     if machine_state != prev_state and prev_state is not None:
                         _write_event(timestamp, 'STATE_CHANGE',
                                      from_val=state_name(prev_state),
-                                     to_val=state_name(machine_state) if machine_state else '',
+                                     to_val=state_name(machine_state) if machine_state is not None else '',
                                      from_code=prev_state,
                                      to_code=machine_state,
                                      puller_feet=puller_feet,
@@ -1268,7 +1271,7 @@ def monitor_loop():
                         _latest.update({
                             'timestamp':           timestamp,
                             'machine_state':       machine_state,
-                            'state_name':          state_name(machine_state) if machine_state else 'Unknown',
+                            'state_name':          state_name(machine_state) if machine_state is not None else 'Unknown',
                             'table_speed':         round(table_speed, 4)  if table_speed  else None,
                             'puller_speed':        round(puller_speed, 4) if puller_speed else None,
                             'speed_ratio':         speed_ratio,
@@ -2137,11 +2140,13 @@ def get_floor_report_data():
                     rows = [r for r in csv.DictReader(f) if r.get('Timestamp','').startswith(today)] + rows
             except Exception:
                 pass
-        seen = set(); deduped = []
-        for row in rows:
-            t = row.get('Timestamp','')
-            if t not in seen: seen.add(t); deduped.append(row)
-        return deduped
+        # NOTE: no timestamp-based dedup here. Archiving uses an atomic os.rename(),
+        # so a row can never legitimately appear in both the live file and an archive —
+        # any two rows sharing the same second-precision timestamp are distinct real
+        # samples (e.g. during a PLC reconnect burst), not duplicates. Dropping them
+        # by timestamp previously caused this function's running% to read lower than
+        # calculate_daily_state_percentages() (the pie chart), which performs no dedup.
+        return rows
 
     proc_rows  = read_today_rows(PROCESS_LOG, today_str)
     event_rows = read_today_rows(EVENT_LOG,   today_str)
