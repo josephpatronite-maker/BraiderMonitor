@@ -64,10 +64,10 @@ HIRES_RING_SIZE = int(PRE_EVENT_SECONDS / HIRES_POLL_INTERVAL)  # 20 rows
 STARTUP_GRACE_SECONDS = 5
 
 STATE_CODES = {
-    1:   'OFF',
-    2:   'READY',
-    4:   'STOPPED',
-    8:   'STARTING',
+    0:   'OFF',
+    1:   'STOPPED',
+    2:   'STARTING',
+    4:   'READY',
     16:  'RUNNING',
     32:  'STOPPING',
     64:  'PAUSING',
