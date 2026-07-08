@@ -403,56 +403,21 @@ _last_archive_check_minute = -1   # guards against multiple fires in same minute
 
 
 def independent_archiver_loop():
-    """Background thread: checks wall-clock every 30 s and archives when needed."""
-    global _last_archive_check_minute
-    log.info('Archiver thread started.')
-    while True:
-        try:
-            now = datetime.now()
-            minute_key = (now.year, now.month, now.day, now.hour, now.minute)
-
-            if minute_key != _last_archive_check_minute:
-                _last_archive_check_minute = minute_key
-                _run_archive_checks(now)
-        except Exception as e:
-            log.error(f'Archiver thread error: {e}')
-        time.sleep(30)
+    """
+    DISABLED — archiving is now handled by cron via /home/pi/braider_archive.sh.
+    This thread stub exists so the thread start call below doesn't error out.
+    Crontab entries (set with: crontab -e):
+      5 0 * * 0   /home/pi/braider_archive.sh weekly  >> /home/pi/braider_logs/archive_cron.log 2>&1
+      5 0 1 * *   /home/pi/braider_archive.sh monthly >> /home/pi/braider_logs/archive_cron.log 2>&1
+    """
+    log.info('Archiver thread started (cron mode — in-process archiver disabled).')
+    # Thread exits immediately; cron handles all archiving externally.
+    return
 
 
 def _run_archive_checks(now: datetime):
-    """Execute file rotations if calendar conditions are met."""
-    is_sunday_midnight     = (now.weekday() == 6 and now.hour == 0 and now.minute == 0)
-    is_monthstart_midnight = (now.day == 1 and now.hour == 0 and now.minute == 0)
-
-    archived_any = False
-
-    if is_sunday_midnight:
-        if os.path.exists(PROCESS_LOG) and os.path.getsize(PROCESS_LOG) > 0:
-            archive_name = PROCESS_LOG.replace(
-                '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
-            )
-            try:
-                os.rename(PROCESS_LOG, archive_name)
-                log.info(f'Weekly archive: {os.path.basename(PROCESS_LOG)} → {os.path.basename(archive_name)}')
-                archived_any = True
-            except OSError as e:
-                log.error(f'Weekly archive failed: {e}')
-
-    if is_monthstart_midnight:
-        for filepath in [EVENT_LOG, OEE_LOG, WIRE_BREAK_LOG]:
-            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                archive_name = filepath.replace(
-                    '.csv', f'_archived_{now.strftime("%Y%m%d_%H%M%S")}.csv'
-                )
-                try:
-                    os.rename(filepath, archive_name)
-                    log.info(f'Monthly archive: {os.path.basename(filepath)} → {os.path.basename(archive_name)}')
-                    archived_any = True
-                except OSError as e:
-                    log.error(f'Monthly archive failed for {filepath}: {e}')
-
-    if archived_any:
-        log.info('Archive pass complete.')
+    """DISABLED — see independent_archiver_loop docstring."""
+    pass
 
 
 # ── CSV writer with instant column-update archive ────────────────────────────
