@@ -59,34 +59,34 @@ from collections import deque
 log = logging.getLogger(__name__)
 
 # ── Tunable thresholds ────────────────────────────────────────────────────────
-# Calibrated from normal-running baseline (19,248 windows across both braiders)
-# vs all fault events (100 events: 38 WIRE_BREAK + 62 ESTOP_OR_ABORT):
+# Calibrated from normal-running baseline (40,237 windows) vs 100 fault events.
 #
-# Normal running Pre_Max_Vel_Error: avg=0.019, p95=0.039, p99=0.052, max=0.125
-# Fault events   Pre_Max_Vel_Error: avg=0.110, p90=0.325, max=0.588
+# PREDICTION LOGIC (OR):
+#   Fires when EITHER condition is true:
+#     A) VelErr >= VEL_HIGH_THRESHOLD                          (high spike alone)
+#     B) VelErr >= VEL_MID_THRESHOLD  AND  Vol >= VOL_THRESHOLD (moderate spike + volatility)
 #
-# Threshold sweep results (full dataset):
-#   0.05 → 42% sensitivity, 1.3% FP rate, 15% precision  (too many FP)
-#   0.07 → 38% sensitivity, 0.1% FP rate, 69% precision
-#   0.08 → 37% sensitivity, 0.016% FP rate, 93% precision  ← recommended
-#   0.10 → 32% sensitivity, 0.005% FP rate, 97% precision
-#   0.15 → 31% sensitivity, 0% FP rate, 100% precision    (too conservative)
+# Rationale: normal running in the 0.03-0.08 vel band has near-zero volatility
+# (avg=0.0007), while fault events in that same band average 0.055 volatility.
+# The two populations are cleanly separated by volatility once velocity is
+# in the moderate range — so the AND gate in condition B adds real information
+# rather than just being a noise filter.
 #
-# 0.08 is the recommended starting point: near-zero false positives from 19k
-# normal windows, reasonable sensitivity, 93% precision when it fires.
-# Lower toward 0.06 if you want more sensitivity and can tolerate occasional
-# false positives. Raise toward 0.10 if false positives become a nuisance.
+# Performance at these thresholds (vs 40,237 normal windows, 100 fault events):
+#   Condition A alone (vel >= 0.08):              37% recall, 0.02% FP, 93% precision
+#   Condition B alone (vel 0.03-0.08, vol>=0.035): 20 extra faults, 1 extra FP, 95% precision
+#   Combined OR:                                  57% recall, 0.02% FP, ~95% precision
 #
-# NOTE: Braider 2 runs at naturally higher normal vel_error than Braider 1
-# (Braider 1 max normal = 0.049, Braider 2 max normal = 0.125). If you want
-# per-braider thresholds, set Braider 1 to 0.05 and Braider 2 to 0.08.
-# Currently using a single threshold calibrated to the combined dataset.
-VEL_ERROR_THRESHOLD   = 0.08   # Pre_Max_Vel_Error — 0.016% FP rate, 93% precision
-VOLATILITY_THRESHOLD  = 0.002  # Speed ratio std-dev — loose noise filter only
-WINDOW_SECS           = 3.0    # Rolling window length (seconds)
-POLL_INTERVAL         = 0.5    # Poll rate (seconds) — matches HIRES loop
-VALIDATION_WINDOW_SECS = 10.0  # How long to watch for a real event after prediction
-COOLDOWN_SECS         = 15.0   # Minimum seconds between consecutive predictions
+# Lower VEL_HIGH_THRESHOLD toward 0.06 if you want more sensitivity at the cost
+# of a small precision drop. Lower VEL_MID_THRESHOLD toward 0.025 carefully —
+# the false positive count rises sharply below 0.025 in the mid-vel band.
+VEL_HIGH_THRESHOLD  = 0.08    # High-velocity spike: fires alone, no volatility needed
+VEL_MID_THRESHOLD   = 0.03    # Moderate spike: only fires when volatility also elevated
+VOL_THRESHOLD       = 0.035   # Volatility gate for moderate spikes (nearly zero in normal running)
+WINDOW_SECS         = 3.0     # Rolling window length (seconds)
+POLL_INTERVAL       = 0.5     # Poll rate (seconds) — matches HIRES loop
+VALIDATION_WINDOW_SECS = 10.0 # How long to watch for a real event after prediction
+COOLDOWN_SECS       = 15.0    # Minimum seconds between consecutive predictions
 
 # PLC tags to read
 # Puller_VelCmdErr is computed by the monitoring script on Braider 2
@@ -225,22 +225,27 @@ class PredictorLoop:
         # Check for pending validations before evaluating new predictions
         self._check_validations(now)
 
-        # Evaluate prediction thresholds
-        if max_vel_error >= VEL_ERROR_THRESHOLD and volatility >= VOLATILITY_THRESHOLD:
-            # Check cooldown
+        # ── OR prediction logic ──────────────────────────────────────────────
+        # Condition A: large velocity spike alone (high confidence)
+        condition_a = max_vel_error >= VEL_HIGH_THRESHOLD
+        # Condition B: moderate velocity spike + elevated volatility (together significant)
+        condition_b = (VEL_MID_THRESHOLD <= max_vel_error < VEL_HIGH_THRESHOLD) and (volatility >= VOL_THRESHOLD)
+
+        if condition_a or condition_b:
+            trigger_condition = 'A (high spike)' if condition_a else 'B (moderate spike + volatility)'
             if (self._last_prediction_time is None or
                     (now - self._last_prediction_time).total_seconds() >= COOLDOWN_SECS):
-                self._fire_prediction(now, max_vel_error, volatility)
+                self._fire_prediction(now, max_vel_error, volatility, trigger_condition)
 
-    def _fire_prediction(self, now: datetime, max_vel_error: float, volatility: float):
+    def _fire_prediction(self, now: datetime, max_vel_error: float, volatility: float, trigger_condition: str):
         """Record a prediction and start watching for validation."""
         self._last_prediction_time = now
         ts_str = now.strftime('%Y-%m-%d %H:%M:%S')
 
         log.warning(f'[{self.braider_id}] ⚠ WIRE BREAK PREDICTION at {ts_str} '
-                    f'(max_vel_err={max_vel_error:.4f}, volatility={volatility:.4f})')
+                    f'(max_vel_err={max_vel_error:.4f}, volatility={volatility:.4f}, '
+                    f'condition={trigger_condition})')
 
-        # Write initial PENDING row to log
         row = {
             'Timestamp':              ts_str,
             'Braider_ID':             self.braider_id,
@@ -249,7 +254,9 @@ class PredictorLoop:
             'Validated':              'PENDING',
             'Validation_Timestamp':   '',
             'Hires_Event_Type':       '',
-            'Notes':                  f'Thresholds: vel>={VEL_ERROR_THRESHOLD}, vol>={VOLATILITY_THRESHOLD}',
+            'Notes':                  (f'Condition {trigger_condition} — '
+                                       f'thresholds: high={VEL_HIGH_THRESHOLD}, '
+                                       f'mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD}'),
         }
         self._append_log_row(row)
 
