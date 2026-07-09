@@ -99,6 +99,7 @@ PRED_TAGS = [
     'servoPuller_Axis.ActualVelocity',
     'realTableSpeed',
     'Puller_Actual_Speed',
+    'Machine_State',
 ]
 
 
@@ -182,10 +183,17 @@ class PredictorLoop:
         # Parse tag values safely
         tag_vals = {r.tag: r.value for r in results if r.value is not None}
 
-        cmd_vel     = tag_vals.get('servoPuller_Axis.CommandVelocity')
-        act_vel     = tag_vals.get('servoPuller_Axis.ActualVelocity')
-        table_speed = tag_vals.get('realTableSpeed')
-        pull_speed  = tag_vals.get('Puller_Actual_Speed')
+        cmd_vel      = tag_vals.get('servoPuller_Axis.CommandVelocity')
+        act_vel      = tag_vals.get('servoPuller_Axis.ActualVelocity')
+        table_speed  = tag_vals.get('realTableSpeed')
+        pull_speed   = tag_vals.get('Puller_Actual_Speed')
+        machine_state = tag_vals.get('Machine_State')
+
+        # Only evaluate during active production — clears the window on any
+        # non-running state so stale samples don't bleed across a stop/start
+        if machine_state != 16:
+            self._window.clear()
+            return
 
         # Compute velocity command error — same calculation the monitoring
         # script uses to derive Puller_VelCmdErr for the CSV logs
