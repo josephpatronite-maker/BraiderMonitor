@@ -65,32 +65,29 @@ log = logging.getLogger(__name__)
 #
 # PREDICTION LOGIC (OR):
 #   Fires when EITHER condition is true:
-#     A) VelErr >= VEL_HIGH_THRESHOLD                          (high spike alone)
-#     B) VelErr >= VEL_MID_THRESHOLD  AND  Vol >= VOL_THRESHOLD (moderate spike + volatility)
+#     A) VelErr >= VEL_THRESHOLD     (large velocity spike alone)
+#     B) Volatility >= VOL_THRESHOLD (elevated speed ratio volatility alone)
 #
-# Performance at these thresholds (3-second window features):
-#   Condition A alone (vel >= 0.08):              30% recall, 0.017% FP, 81% precision
-#   Combined OR (vel_high=0.08, mid=0.02, vol=0.035): 52% recall, 0.035% FP, 79% precision
+# No lower bound on velocity for Condition B — the volatility gate (0.035) is
+# already extremely selective on its own. Normal running p99 volatility = 0.022,
+# so vol>=0.035 is a top-0.1% event during normal production. Adding a vel
+# lower bound cuts out real fault events without meaningfully reducing FP.
 #
-# Why vel_mid=0.02 (not 0.03):
-#   Lowering the mid threshold from 0.03 to 0.02 recovers 12 additional fault
-#   events with only a small FP rate increase (0.017% → 0.035%). The volatility
-#   gate (vol>=0.035) remains the key discriminator — normal running windows
-#   almost never exceed 0.035 volatility (p99 = 0.022), so the AND gate stays
-#   tight even with a lower velocity lower bound.
+# Performance (3-second window, 40,237 normal windows, 100 fault events):
+#   Condition A alone (vel >= 0.08):  30% recall, 0.017% FP, 81% precision
+#   Combined OR:                      80% recall, 0.099% FP, 67% precision
+#   False alarms per 8-hour shift:    ~6 (with 15-second cooldown)
 #
-# Why these features are computed over 3 seconds (not full PRE window):
-#   The live predictor evaluates a 3-second rolling window. Calibrating against
-#   the full 10-second PRE window would overstate recall since the predictor
-#   only sees the most recent 3 seconds when it fires. findtrends_v2.py
-#   restricts the PRE window to Hires_Offset_s >= -3.0 to match exactly.
-VEL_HIGH_THRESHOLD  = 0.08    # High-velocity spike: fires alone, no volatility needed
-VEL_MID_THRESHOLD   = 0.02    # Moderate spike lower bound (lowered from 0.03 — recovers 12 faults)
-VOL_THRESHOLD       = 0.035   # Volatility gate: p99 of normal running = 0.022, so this is very tight
-WINDOW_SECS         = 3.0     # Rolling window length (seconds)
-POLL_INTERVAL       = 0.5     # Poll rate (seconds) — matches HIRES loop
-VALIDATION_WINDOW_SECS = 10.0 # How long to watch for a real event after prediction
-COOLDOWN_SECS       = 15.0    # Minimum seconds between consecutive predictions
+# Tighten VOL_THRESHOLD to 0.04 if false alarms become disruptive in practice
+# (drops to ~4/shift, 72% recall). Loosen to 0.03 for more sensitivity
+# (~10/shift, 81% recall). VEL_THRESHOLD is stable — don't lower below 0.07
+# without rechecking FP rate against the baseline.
+VEL_THRESHOLD   = 0.08    # Condition A: velocity spike alone
+VOL_THRESHOLD   = 0.035   # Condition B: speed ratio volatility alone
+WINDOW_SECS     = 3.0     # Rolling window length (seconds)
+POLL_INTERVAL   = 0.5     # Poll rate (seconds) — matches HIRES loop
+VALIDATION_WINDOW_SECS = 10.0  # How long to watch for a real event after prediction
+COOLDOWN_SECS   = 15.0    # Minimum seconds between consecutive predictions
 
 # PLC tags to read
 # Puller_VelCmdErr is computed by the monitoring script on Braider 2
@@ -157,7 +154,7 @@ class PredictorLoop:
     def run(self):
         """Main loop — call this from a daemon thread."""
         log.info(f'[{self.braider_id}] Predictor loop started '
-                 f'(vel_high={VEL_HIGH_THRESHOLD}, vel_mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD})')
+                 f'(vel>={VEL_THRESHOLD}, vol>={VOL_THRESHOLD}, window={WINDOW_SECS}s)')
 
         from pycomm3 import LogixDriver
 
@@ -230,13 +227,16 @@ class PredictorLoop:
         self._check_validations(now)
 
         # ── OR prediction logic ──────────────────────────────────────────────
-        # Condition A: large velocity spike alone (high confidence)
-        condition_a = max_vel_error >= VEL_HIGH_THRESHOLD
-        # Condition B: moderate velocity spike + elevated volatility (together significant)
-        condition_b = (VEL_MID_THRESHOLD <= max_vel_error < VEL_HIGH_THRESHOLD) and (volatility >= VOL_THRESHOLD)
+        # Condition A: large velocity spike (high confidence alone)
+        condition_a = max_vel_error >= VEL_THRESHOLD
+        # Condition B: elevated speed ratio volatility (selective on its own —
+        # normal running p99 vol = 0.022, so vol>=0.035 is very rare in normal production)
+        condition_b = volatility >= VOL_THRESHOLD
 
         if condition_a or condition_b:
-            trigger_condition = 'A (high spike)' if condition_a else 'B (moderate spike + volatility)'
+            trigger_condition = 'A (vel spike)' if condition_a and not condition_b \
+                           else 'B (volatility)' if condition_b and not condition_a \
+                           else 'A+B (both)'
             if (self._last_prediction_time is None or
                     (now - self._last_prediction_time).total_seconds() >= COOLDOWN_SECS):
                 self._fire_prediction(now, max_vel_error, volatility, trigger_condition)
@@ -259,11 +259,9 @@ class PredictorLoop:
             'Validation_Timestamp':   '',
             'Hires_Event_Type':       '',
             'Notes':                  (f'Condition {trigger_condition} — '
-                                       f'thresholds: high={VEL_HIGH_THRESHOLD}, '
-                                       f'mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD} '
-                                       f'[3s window, 52% recall, 0.035% FP]'),
+                                       f'vel>={VEL_THRESHOLD}, vol>={VOL_THRESHOLD} '
+                                       f'[3s window, 80% recall, 0.099% FP]'),
         }
-        self._append_log_row(row)
 
         # Track for validation
         validation_entry = {
