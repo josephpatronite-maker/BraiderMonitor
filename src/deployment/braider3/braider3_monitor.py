@@ -33,8 +33,8 @@ from flask import Flask, jsonify, render_template_string
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-PLC_IP     = '192.168.1.102'
-BRAIDER_ID = 'Braider_2'
+PLC_IP     = '192.168.1.102' # may be different
+BRAIDER_ID = 'Braider_3'
 
 LOG_DIR      = os.path.expanduser('~/braider_logs')
 HIRES_LOG_DIR = os.path.join(LOG_DIR, 'hires_events')
