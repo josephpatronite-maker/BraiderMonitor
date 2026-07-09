@@ -59,30 +59,34 @@ from collections import deque
 log = logging.getLogger(__name__)
 
 # ── Tunable thresholds ────────────────────────────────────────────────────────
-# Calibrated from normal-running baseline (40,237 windows) vs 100 fault events.
+# Calibrated from normal-running baseline (40,237 windows) vs 100 fault events,
+# using features computed over the LAST 3 SECONDS before fault trigger —
+# matching the live predictor's rolling window exactly.
 #
 # PREDICTION LOGIC (OR):
 #   Fires when EITHER condition is true:
 #     A) VelErr >= VEL_HIGH_THRESHOLD                          (high spike alone)
 #     B) VelErr >= VEL_MID_THRESHOLD  AND  Vol >= VOL_THRESHOLD (moderate spike + volatility)
 #
-# Rationale: normal running in the 0.03-0.08 vel band has near-zero volatility
-# (avg=0.0007), while fault events in that same band average 0.055 volatility.
-# The two populations are cleanly separated by volatility once velocity is
-# in the moderate range — so the AND gate in condition B adds real information
-# rather than just being a noise filter.
+# Performance at these thresholds (3-second window features):
+#   Condition A alone (vel >= 0.08):              30% recall, 0.017% FP, 81% precision
+#   Combined OR (vel_high=0.08, mid=0.02, vol=0.035): 52% recall, 0.035% FP, 79% precision
 #
-# Performance at these thresholds (vs 40,237 normal windows, 100 fault events):
-#   Condition A alone (vel >= 0.08):              37% recall, 0.02% FP, 93% precision
-#   Condition B alone (vel 0.03-0.08, vol>=0.035): 20 extra faults, 1 extra FP, 95% precision
-#   Combined OR:                                  57% recall, 0.02% FP, ~95% precision
+# Why vel_mid=0.02 (not 0.03):
+#   Lowering the mid threshold from 0.03 to 0.02 recovers 12 additional fault
+#   events with only a small FP rate increase (0.017% → 0.035%). The volatility
+#   gate (vol>=0.035) remains the key discriminator — normal running windows
+#   almost never exceed 0.035 volatility (p99 = 0.022), so the AND gate stays
+#   tight even with a lower velocity lower bound.
 #
-# Lower VEL_HIGH_THRESHOLD toward 0.06 if you want more sensitivity at the cost
-# of a small precision drop. Lower VEL_MID_THRESHOLD toward 0.025 carefully —
-# the false positive count rises sharply below 0.025 in the mid-vel band.
+# Why these features are computed over 3 seconds (not full PRE window):
+#   The live predictor evaluates a 3-second rolling window. Calibrating against
+#   the full 10-second PRE window would overstate recall since the predictor
+#   only sees the most recent 3 seconds when it fires. findtrends_v2.py
+#   restricts the PRE window to Hires_Offset_s >= -3.0 to match exactly.
 VEL_HIGH_THRESHOLD  = 0.08    # High-velocity spike: fires alone, no volatility needed
-VEL_MID_THRESHOLD   = 0.03    # Moderate spike: only fires when volatility also elevated
-VOL_THRESHOLD       = 0.035   # Volatility gate for moderate spikes (nearly zero in normal running)
+VEL_MID_THRESHOLD   = 0.02    # Moderate spike lower bound (lowered from 0.03 — recovers 12 faults)
+VOL_THRESHOLD       = 0.035   # Volatility gate: p99 of normal running = 0.022, so this is very tight
 WINDOW_SECS         = 3.0     # Rolling window length (seconds)
 POLL_INTERVAL       = 0.5     # Poll rate (seconds) — matches HIRES loop
 VALIDATION_WINDOW_SECS = 10.0 # How long to watch for a real event after prediction
@@ -256,7 +260,8 @@ class PredictorLoop:
             'Hires_Event_Type':       '',
             'Notes':                  (f'Condition {trigger_condition} — '
                                        f'thresholds: high={VEL_HIGH_THRESHOLD}, '
-                                       f'mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD}'),
+                                       f'mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD} '
+                                       f'[3s window, 52% recall, 0.035% FP]'),
         }
         self._append_log_row(row)
 
