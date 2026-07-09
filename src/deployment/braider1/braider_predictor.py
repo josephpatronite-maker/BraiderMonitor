@@ -88,9 +88,15 @@ POLL_INTERVAL         = 0.5    # Poll rate (seconds) — matches HIRES loop
 VALIDATION_WINDOW_SECS = 10.0  # How long to watch for a real event after prediction
 COOLDOWN_SECS         = 15.0   # Minimum seconds between consecutive predictions
 
-# PLC tags to read (same as HIRES loop)
+# PLC tags to read
+# Puller_VelCmdErr is computed by the monitoring script on Braider 2
+# (CommandVelocity - ActualVelocity) and stored as a derived tag in the CSV,
+# but it doesn't exist as a real PLC tag on Braider 1. The predictor reads
+# the two component tags directly and computes the same value at runtime,
+# which works correctly on both braiders.
 PRED_TAGS = [
-    'Puller_VelCmdErr',
+    'servoPuller_Axis.CommandVelocity',
+    'servoPuller_Axis.ActualVelocity',
     'realTableSpeed',
     'Puller_Actual_Speed',
 ]
@@ -175,12 +181,20 @@ class PredictorLoop:
 
         # Parse tag values safely
         tag_vals = {r.tag: r.value for r in results if r.value is not None}
-        vel_err     = tag_vals.get('Puller_VelCmdErr', None)
-        table_speed = tag_vals.get('realTableSpeed', None)
-        pull_speed  = tag_vals.get('Puller_Actual_Speed', None)
 
-        if vel_err is None or table_speed is None or pull_speed is None:
-            return  # Skip cycle if any tag read failed
+        cmd_vel     = tag_vals.get('servoPuller_Axis.CommandVelocity')
+        act_vel     = tag_vals.get('servoPuller_Axis.ActualVelocity')
+        table_speed = tag_vals.get('realTableSpeed')
+        pull_speed  = tag_vals.get('Puller_Actual_Speed')
+
+        # Compute velocity command error — same calculation the monitoring
+        # script uses to derive Puller_VelCmdErr for the CSV logs
+        if cmd_vel is None or act_vel is None:
+            return
+        vel_err = cmd_vel - act_vel
+
+        if table_speed is None or pull_speed is None:
+            return
 
         # Speed ratio (same calculation as main loop)
         speed_ratio = (vel_err / pull_speed) if pull_speed and abs(pull_speed) > 0.001 else 0.0
