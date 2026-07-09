@@ -1411,6 +1411,20 @@ DASHBOARD_HTML = """
         Updated: <span id="header-timestamp">{{ d.timestamp or '—' }}</span>
     </div>
 
+    <!-- Wire Break Prediction Alert Banner -->
+    <div id="predAlert" style="display:none; background:#b71c1c; color:#fff; padding:10px 16px;
+         border-radius:6px; margin:10px 0; font-family:monospace; font-size:13px;
+         border-left:4px solid #ef5350;">
+      ⚠ WIRE BREAK PREDICTED &nbsp;|&nbsp;
+      <span id="predTime"></span> &nbsp;|&nbsp;
+      vel_err: <span id="predVel"></span> &nbsp;|&nbsp;
+      volatility: <span id="predVol"></span>
+      <span id="predResult" style="margin-left:12px; font-weight:bold;"></span>
+    </div>
+    <style>
+      @keyframes predPulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+    </style>
+
     <div class="section">Machine</div>
     <div class="grid">
 
@@ -1997,6 +2011,52 @@ async function fetchAndUpdate() {
 window.addEventListener('resize', drawChart);
 setInterval(fetchAndUpdate, 2000);
 fetchAndUpdate();
+
+// ── Wire break prediction alert ───────────────────────────────────────────
+let predAlertTimer = null;
+
+function updatePrediction() {
+  fetch('/api/prediction')
+    .then(r => r.json())
+    .then(data => {
+      const el = document.getElementById('predAlert');
+      if (!el) return;
+      if (!data.active) { el.style.display = 'none'; return; }
+
+      document.getElementById('predTime').textContent = data.timestamp || '';
+      document.getElementById('predVel').textContent  = data.max_vel_error !== null ? parseFloat(data.max_vel_error).toFixed(4) : '—';
+      document.getElementById('predVol').textContent  = data.volatility    !== null ? parseFloat(data.volatility).toFixed(4)    : '—';
+
+      const resultEl = document.getElementById('predResult');
+      if (data.validated === true) {
+        el.style.background  = '#1b5e20';
+        el.style.borderColor = '#66bb6a';
+        el.style.animation   = 'none';
+        resultEl.textContent = '✓ VALIDATED';
+      } else if (data.validated === false) {
+        el.style.background  = '#333';
+        el.style.borderColor = '#888';
+        el.style.animation   = 'none';
+        resultEl.textContent = '✗ False positive';
+      } else {
+        el.style.background  = '#b71c1c';
+        el.style.borderColor = '#ef5350';
+        el.style.animation   = 'predPulse 1s infinite';
+        resultEl.textContent = '(watching...)';
+      }
+
+      el.style.display = 'block';
+
+      if (data.validated !== null) {
+        clearTimeout(predAlertTimer);
+        predAlertTimer = setTimeout(() => { el.style.display = 'none'; }, 30000);
+      }
+    })
+    .catch(() => {});
+}
+
+setInterval(updatePrediction, 500);
+updatePrediction();
 </script>
 </body>
 </html>
