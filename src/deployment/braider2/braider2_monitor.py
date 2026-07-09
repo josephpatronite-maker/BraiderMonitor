@@ -30,6 +30,7 @@ from datetime import datetime
 from collections import deque
 from pycomm3 import LogixDriver
 from flask import Flask, jsonify, render_template_string
+from braider_predictor import PredictorLoop
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -399,6 +400,16 @@ def independent_archiver_loop():
 def _run_archive_checks(now: datetime):
     """DISABLED — see independent_archiver_loop docstring."""
     pass
+
+
+predictor = PredictorLoop(
+    braider_id=BRAIDER_ID,
+    log_dir=LOG_DIR,
+    hires_events_dir=os.path.join(LOG_DIR, 'hires_events'),
+    plc_ip=PLC_IP,
+)
+predictor_thread = threading.Thread(target=predictor.run, daemon=True, name='predictor')
+predictor_thread.start()
 
 
 # ── CSV writer with instant column-update archive ────────────────────────────
@@ -1987,6 +1998,12 @@ def dashboard():
         braider_id=BRAIDER_ID,
         normal_wire_bits=IO_NORMAL_RUNNING,
     )
+
+@app.route('/api/prediction')
+def api_prediction():
+    import json
+    with predictor._lock:
+        return json.dumps(predictor.latest_alert), 200, {'Content-Type': 'application/json'}
 
 
 @app.route('/api/latest')
