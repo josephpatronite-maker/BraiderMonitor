@@ -153,7 +153,7 @@ class PredictorLoop:
     def run(self):
         """Main loop — call this from a daemon thread."""
         log.info(f'[{self.braider_id}] Predictor loop started '
-                 f'(vel_threshold={VEL_ERROR_THRESHOLD}, vol_threshold={VOLATILITY_THRESHOLD})')
+                 f'(vel_high={VEL_HIGH_THRESHOLD}, vel_mid={VEL_MID_THRESHOLD}, vol={VOL_THRESHOLD})')
 
         from pycomm3 import LogixDriver
 
