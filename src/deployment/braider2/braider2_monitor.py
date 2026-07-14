@@ -30,7 +30,6 @@ from datetime import datetime
 from collections import deque
 from pycomm3 import LogixDriver
 from flask import Flask, jsonify, render_template_string
-from braider_predictor import PredictorLoop
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -402,14 +401,60 @@ def _run_archive_checks(now: datetime):
     pass
 
 
-predictor = PredictorLoop(
-    braider_id=BRAIDER_ID,
-    log_dir=LOG_DIR,
-    hires_events_dir=os.path.join(LOG_DIR, 'hires_events'),
-    plc_ip=PLC_IP,
-)
-predictor_thread = threading.Thread(target=predictor.run, daemon=True, name='predictor')
-predictor_thread.start()
+# ── Hires event notifier — dashboard alert when a fault event is captured ─────
+_hires_alert_lock   = threading.Lock()
+_hires_latest_alert = {
+    'active':      False,
+    'timestamp':   None,
+    'event_type':  None,
+    'puller_feet': None,
+}
+
+def _watch_hires_events():
+    """Background thread: watches hires_events folder for new files."""
+    seen = set(os.listdir(HIRES_LOG_DIR)) if os.path.exists(HIRES_LOG_DIR) else set()
+    while True:
+        time.sleep(1)
+        try:
+            if not os.path.exists(HIRES_LOG_DIR):
+                continue
+            current = set(os.listdir(HIRES_LOG_DIR))
+            new_files = current - seen
+            for fname in sorted(new_files):
+                if not fname.endswith('.csv'):
+                    seen.add(fname)
+                    continue
+                event_type = 'WIRE_BREAK' if 'wire_break' in fname else 'ESTOP_OR_ABORT'
+                puller_feet = None
+                try:
+                    fpath = os.path.join(HIRES_LOG_DIR, fname)
+                    with open(fpath, newline='', encoding='utf-8') as f:
+                        import csv as _csv
+                        rows = list(_csv.DictReader(f))
+                    trigger = min(
+                        (r for r in rows if r.get('Hires_Offset_s') not in ('', None)),
+                        key=lambda r: abs(float(r.get('Hires_Offset_s', '999'))),
+                        default=None
+                    )
+                    if trigger:
+                        pf = trigger.get('Puller_Pos_Feet')
+                        puller_feet = round(float(pf), 1) if pf else None
+                except Exception:
+                    pass
+                with _hires_alert_lock:
+                    _hires_latest_alert.update({
+                        'active':      True,
+                        'timestamp':   ts(),
+                        'event_type':  event_type,
+                        'puller_feet': puller_feet,
+                    })
+                log.info(f'[{BRAIDER_ID}] Hires event alert: {event_type} at {puller_feet} ft')
+                seen.add(fname)
+        except Exception as e:
+            log.warning(f'Hires event watcher error: {e}')
+
+hires_watcher_thread = threading.Thread(target=_watch_hires_events, daemon=True, name='hires_watcher')
+hires_watcher_thread.start()
 
 
 # ── CSV writer with instant column-update archive ────────────────────────────
@@ -754,6 +799,9 @@ def hires_loop():
             'Estop_Ok':            d.get('I_Emergency_Stop_Ok'),
             'Fault_WireBreak':     d.get('Program:MainProgram.Fault_WireBreak'),
             'Fault_EStop':         d.get('Program:MainProgram.Fault_EStop'),
+            'Recipe_Name':         _oee_derived.get('recipe_name'),
+            'Active_Segment':      _latest.get('active_segment'),
+            'State_Elapsed_Secs':  _latest.get('state_elapsed_s'),
             'Hires_Phase':         phase,
             'Hires_Offset_s':      offset,
         }
@@ -1392,18 +1440,17 @@ DASHBOARD_HTML = """
         Updated: <span id="header-timestamp">{{ d.timestamp or '—' }}</span>
     </div>
 
-    <!-- Wire Break Prediction Alert Banner -->
-    <div id="predAlert" style="display:none; background:#b71c1c; color:#fff; padding:10px 16px;
+    <!-- Fault Event Alert Banner -->
+    <div id="hiresAlert" style="display:none; background:#b71c1c; color:#fff; padding:10px 16px;
          border-radius:6px; margin:10px 0; font-family:monospace; font-size:13px;
-         border-left:4px solid #ef5350;">
-      ⚠ WIRE BREAK PREDICTED &nbsp;|&nbsp;
-      <span id="predTime"></span> &nbsp;|&nbsp;
-      vel_err: <span id="predVel"></span> &nbsp;|&nbsp;
-      volatility: <span id="predVol"></span>
-      <span id="predResult" style="margin-left:12px; font-weight:bold;"></span>
+         border-left:4px solid #ef5350; animation: hiresAlertPulse 1s infinite;">
+      ⚠ FAULT EVENT CAPTURED &nbsp;|&nbsp;
+      <span id="hiresType"></span> &nbsp;|&nbsp;
+      Position: <span id="hiresFeet"></span> ft &nbsp;|&nbsp;
+      <span id="hiresTime"></span>
     </div>
     <style>
-      @keyframes predPulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+      @keyframes hiresAlertPulse { 0%,100%{opacity:1} 50%{opacity:0.65} }
     </style>
 
     <div class="section">Machine</div>
@@ -1993,51 +2040,27 @@ window.addEventListener('resize', drawChart);
 setInterval(fetchAndUpdate, 2000);
 fetchAndUpdate();
 
-// ── Wire break prediction alert ───────────────────────────────────────────
-let predAlertTimer = null;
+// ── Fault event alert banner ──────────────────────────────────────────────────
+let hiresAlertTimer = null;
 
-function updatePrediction() {
-  fetch('/api/prediction')
+function updateHiresAlert() {
+  fetch('/api/hires_alert')
     .then(r => r.json())
     .then(data => {
-      const el = document.getElementById('predAlert');
-      if (!el) return;
-      if (!data.active) { el.style.display = 'none'; return; }
-
-      document.getElementById('predTime').textContent = data.timestamp || '';
-      document.getElementById('predVel').textContent  = data.max_vel_error !== null ? parseFloat(data.max_vel_error).toFixed(4) : '—';
-      document.getElementById('predVol').textContent  = data.volatility    !== null ? parseFloat(data.volatility).toFixed(4)    : '—';
-
-      const resultEl = document.getElementById('predResult');
-      if (data.validated === true) {
-        el.style.background  = '#1b5e20';
-        el.style.borderColor = '#66bb6a';
-        el.style.animation   = 'none';
-        resultEl.textContent = '✓ VALIDATED';
-      } else if (data.validated === false) {
-        el.style.background  = '#333';
-        el.style.borderColor = '#888';
-        el.style.animation   = 'none';
-        resultEl.textContent = '✗ False positive';
-      } else {
-        el.style.background  = '#b71c1c';
-        el.style.borderColor = '#ef5350';
-        el.style.animation   = 'predPulse 1s infinite';
-        resultEl.textContent = '(watching...)';
-      }
-
+      const el = document.getElementById('hiresAlert');
+      if (!el || !data.active) return;
+      document.getElementById('hiresType').textContent  = data.event_type || '';
+      document.getElementById('hiresFeet').textContent  = data.puller_feet !== null ? data.puller_feet : '—';
+      document.getElementById('hiresTime').textContent  = data.timestamp || '';
       el.style.display = 'block';
-
-      if (data.validated !== null) {
-        clearTimeout(predAlertTimer);
-        predAlertTimer = setTimeout(() => { el.style.display = 'none'; }, 30000);
-      }
+      clearTimeout(hiresAlertTimer);
+      hiresAlertTimer = setTimeout(() => { el.style.display = 'none'; }, 30000);
     })
     .catch(() => {});
 }
 
-setInterval(updatePrediction, 500);
-updatePrediction();
+setInterval(updateHiresAlert, 1000);
+updateHiresAlert();
 </script>
 </body>
 </html>
@@ -2059,11 +2082,12 @@ def dashboard():
         normal_wire_bits=IO_NORMAL_RUNNING,
     )
 
-@app.route('/api/prediction')
-def api_prediction():
+@app.route('/api/hires_alert')
+def api_hires_alert():
+    """Latest hires event alert — polled by dashboard to show fault notifications."""
     import json
-    with predictor._lock:
-        return json.dumps(predictor.latest_alert), 200, {'Content-Type': 'application/json'}
+    with _hires_alert_lock:
+        return json.dumps(_hires_latest_alert), 200, {'Content-Type': 'application/json'}
 
 
 @app.route('/api/latest')
