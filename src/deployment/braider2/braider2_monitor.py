@@ -190,6 +190,7 @@ FAST_TAGS = [
     'servoPuller_Axis.ActualVelocity',
     'servoPuller_Axis.CommandVelocity',
     'servoPuller_Axis.MotionStatus',
+    'servoPuller_Axis.TorqueReference',   # confirmed live on this drive config
     'servoTable_Axis.VelocityFeedback',
 ]
 
@@ -340,6 +341,8 @@ HIRES_TAGS = [
     'Program:MainProgram.Fault_StartingTimeout',
     'Program:MainProgram.Table_Drive_Fault',
     'Program:P02_PullerServo.Servo_Axis_Faults',
+    'Machine.Any_Stop_Pressed',
+    'Machine.Any_Start_Pressed',
 ]
 
 
@@ -802,6 +805,9 @@ def hires_loop():
             'Recipe_Name':         _oee_derived.get('recipe_name'),
             'Active_Segment':      _latest.get('active_segment'),
             'State_Elapsed_Secs':  _latest.get('state_elapsed_s'),
+            'Any_Stop_Pressed':    d.get('Machine.Any_Stop_Pressed'),
+            'Any_Start_Pressed':   d.get('Machine.Any_Start_Pressed'),
+            'TorqueReference':     d.get('servoPuller_Axis.TorqueReference'),
             'Hires_Phase':         phase,
             'Hires_Offset_s':      offset,
         }
