@@ -1147,6 +1147,7 @@ def monitor_loop():
                         'Puller_ActualPos':      d.get('servoPuller_Axis.ActualPosition'),
                         'Puller_CmdPos':         d.get('servoPuller_Axis.CommandPosition'),
                         'Puller_MotionStatus':   d.get('servoPuller_Axis.MotionStatus'),
+                        'Puller_TorqueRef':      d.get('servoPuller_Axis.TorqueReference'),
                         'Table_VelFeedback':     d.get('servoTable_Axis.VelocityFeedback'),
                     }
                     write_csv_row(PROCESS_LOG, process_row)
