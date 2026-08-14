@@ -2683,43 +2683,61 @@ def api_floor_data():
     return jsonify({'timestamps':timestamps_,'table_speed':table_speed_,
                     'puller_speed':puller_speed_,'speed_ratio':speed_ratio_,'states':states_})
 
+# ── Hub machine registry ──────────────────────────────────────────────────────
+# To add another braider to the /home hub (e.g. Braider 4), just add one entry
+# here — no other code changes needed. 'local' is only ever True for this
+# machine (Braider 2); every other entry is fetched over SSH.
+BRAIDER_MACHINES = [
+    {'id': 'Braider_1', 'label': 'Braider 1', 'host': 'braider1.local', 'local': False},
+    {'id': 'Braider_2', 'label': 'Braider 2', 'host': 'braider2.local', 'local': True},
+    {'id': 'Braider_3', 'label': 'Braider 3', 'host': 'braider3.local', 'local': False},
+    # {'id': 'Braider_4', 'label': 'Braider 4', 'host': 'braider4.local', 'local': False},
+]
+
+
 @app.route('/home')
 def home_hub():
-    """Hub page linking to both braider dashboards."""
+    """Hub page linking to every braider dashboard in BRAIDER_MACHINES."""
     try:
-        # Braider 2 — local data, same source the main dashboard's pie uses
-        with _lock:
-            braider2_online = bool(_latest.get('connected'))
-            braider2_state  = _latest.get('state_name') or 'Unknown'
-        braider2_pcts = calculate_daily_state_percentages()
-        braider2_util = round(braider2_pcts.get('RUNNING', 0), 1)
+        machines = []
+        online_utils = []
 
-        # Braider 1 — read over SSH, same calculation logic applied remotely
-        braider1_data = get_remote_braider_stats('braider1.local', 'Braider_1')
-        braider1_online = braider1_data.get('online', False)
-        braider1_state  = braider1_data.get('state', 'Offline')
-        braider1_pcts   = braider1_data.get('pcts', {})
-        braider1_util   = round(braider1_pcts.get('RUNNING', 0), 1)
+        for m in BRAIDER_MACHINES:
+            if m['local']:
+                # This machine (Braider 2) — local data, same source the main
+                # dashboard's pie uses. No SSH round-trip needed.
+                with _lock:
+                    online = bool(_latest.get('connected'))
+                    state  = _latest.get('state_name') or 'Unknown'
+                pcts = calculate_daily_state_percentages()
+            else:
+                data   = get_remote_braider_stats(m['host'], m['id'])
+                online = data.get('online', False)
+                state  = data.get('state', 'Offline')
+                pcts   = data.get('pcts', {})
+
+            util = round(pcts.get('RUNNING', 0), 1)
+            if online:
+                online_utils.append(util)
+
+            machines.append({
+                'id': m['id'],
+                'label': m['label'],
+                'host': m['host'],
+                'online': online,
+                'state': state,
+                'pcts': pcts,
+                'util': util,
+            })
 
         # Combined average utilization (only across machines currently online;
-        # if both are offline, show 0 rather than dividing by zero)
-        online_utils = []
-        if braider1_online:
-            online_utils.append(braider1_util)
-        if braider2_online:
-            online_utils.append(braider2_util)
+        # if all are offline, show 0 rather than dividing by zero)
         avg_util = round(sum(online_utils) / len(online_utils), 1) if online_utils else 0.0
 
         return render_template_string(HOME_HUB_HTML,
-            braider1_online=braider1_online,
-            braider1_state=braider1_state,
-            braider1_pcts=braider1_pcts,
-
-            braider2_online=braider2_online,
-            braider2_state=braider2_state,
-            braider2_pcts=braider2_pcts,
-
+            machines=machines,
             avg_util=avg_util,
+            machine_count=len(BRAIDER_MACHINES),
             current_time=datetime.now().strftime('%I:%M %p')
         )
     except Exception as e:
@@ -2915,67 +2933,40 @@ HOME_HUB_HTML = '''
 
         <div class="section">Combined</div>
         <div class="avg-card">
-            <div class="avg-label">Average Utilization<br>(Today, both braiders)</div>
+            <div class="avg-label">Average Utilization<br>(Today, {{ machine_count }} braider{{ 's' if machine_count != 1 else '' }})</div>
             <div class="avg-value">{{ avg_util }}%</div>
         </div>
 
         <div class="section">Active Braiders</div>
         <div class="hub-grid">
-            <!-- Braider 1 Card -->
+            {% for m in machines %}
             <div class="braider-card">
                 <div class="card-header">
-                    <div class="card-title">Braider 1</div>
-                    <div class="status-badge {% if braider1_online %}status-online{% else %}status-offline{% endif %}">
-                        {% if braider1_online %}Online{% else %}Offline{% endif %}
+                    <div class="card-title">{{ m.label }}</div>
+                    <div class="status-badge {% if m.online %}status-online{% else %}status-offline{% endif %}">
+                        {% if m.online %}Online{% else %}Offline{% endif %}
                     </div>
                 </div>
 
                 <div class="stat-row">
                     <span class="stat-label">State</span>
-                    <span class="stat-value">{{ braider1_state }}</span>
+                    <span class="stat-value">{{ m.state }}</span>
                 </div>
 
                 <div class="pie-row">
-                    <canvas id="pie1" width="90" height="90"></canvas>
+                    <canvas id="pie-{{ m.id }}" width="90" height="90"></canvas>
                     <div>
-                        <div class="pie-value" id="pie1-value">—</div>
-                        <div class="pie-legend" id="pie1-legend"></div>
+                        <div class="pie-value" id="pie-{{ m.id }}-value">—</div>
+                        <div class="pie-legend" id="pie-{{ m.id }}-legend"></div>
                     </div>
                 </div>
 
                 <div class="button-group">
-                    <a href="http://braider1.local:5000" class="btn btn-primary" target="_blank">Dashboard</a>
-                    <a href="http://braider1.local:5000/floor" class="btn btn-secondary" target="_blank">Report</a>
+                    <a href="http://{{ m.host }}:5000" class="btn btn-primary" target="_blank">Dashboard</a>
+                    <a href="http://{{ m.host }}:5000/floor" class="btn btn-secondary" target="_blank">Report</a>
                 </div>
             </div>
-
-            <!-- Braider 2 Card -->
-            <div class="braider-card">
-                <div class="card-header">
-                    <div class="card-title">Braider 2</div>
-                    <div class="status-badge {% if braider2_online %}status-online{% else %}status-offline{% endif %}">
-                        {% if braider2_online %}Online{% else %}Offline{% endif %}
-                    </div>
-                </div>
-
-                <div class="stat-row">
-                    <span class="stat-label">State</span>
-                    <span class="stat-value">{{ braider2_state }}</span>
-                </div>
-
-                <div class="pie-row">
-                    <canvas id="pie2" width="90" height="90"></canvas>
-                    <div>
-                        <div class="pie-value" id="pie2-value">—</div>
-                        <div class="pie-legend" id="pie2-legend"></div>
-                    </div>
-                </div>
-
-                <div class="button-group">
-                    <a href="http://braider2.local:5000" class="btn btn-primary" target="_blank">Dashboard</a>
-                    <a href="http://braider2.local:5000/floor" class="btn btn-secondary" target="_blank">Report</a>
-                </div>
-            </div>
+            {% endfor %}
         </div>
 
         <div class="footer">
@@ -3027,10 +3018,12 @@ HOME_HUB_HTML = '''
             }
         }
 
-        drawHubPie('pie1', 'pie1-value', 'pie1-legend', {{ braider1_pcts | tojson }});
-        drawHubPie('pie2', 'pie2-value', 'pie2-legend', {{ braider2_pcts | tojson }});
+        const hubMachines = {{ machines | tojson }};
+        hubMachines.forEach(m => {
+            drawHubPie(`pie-${m.id}`, `pie-${m.id}-value`, `pie-${m.id}-legend`, m.pcts);
+        });
 
-        // Auto-refresh every 30 seconds so SSH-fetched Braider 1 data stays current
+        // Auto-refresh every 30 seconds so SSH-fetched remote data stays current
         setTimeout(() => location.reload(), 30000);
     </script>
 </body>
