@@ -22,6 +22,8 @@ Author: Joseph Patronite, Noble Gas Systems
 """
 
 import csv
+import json
+import requests
 import os
 import time
 import threading
@@ -602,6 +604,26 @@ _operator_input = {
     'serial_number': '',
     'layer_number':  '',
 }
+
+# ── QuickBase config (optional — only needed for the QR-scan lookup) ──────────
+# Loaded from environment variables first, falling back to a local
+# qb_config.json file. qb_config.json is git-ignored on purpose — it holds a
+# real credential and must never be committed. See qb_config.json.example
+# for the expected format. If neither is present, the QR-scan feature simply
+# returns a clear "not configured" error and everything else keeps working.
+QB_REALM      = os.environ.get('QB_REALM', 'noblegassys.quickbase.com')
+QB_USER_TOKEN = os.environ.get('QB_USER_TOKEN')
+
+if not QB_USER_TOKEN:
+    _qb_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qb_config.json')
+    if os.path.exists(_qb_config_path):
+        try:
+            with open(_qb_config_path) as _f:
+                _qb_cfg = json.load(_f)
+            QB_REALM      = _qb_cfg.get('realm', QB_REALM)
+            QB_USER_TOKEN = _qb_cfg.get('user_token')
+        except Exception as _e:
+            log.warning(f'Could not load qb_config.json: {_e}')
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -1458,6 +1480,7 @@ DASHBOARD_HTML = """
         .axis-warn { background:#b71c1c; color:#ef9a9a; }
         .checks { font-size:14px; line-height:2; }
     </style>
+    <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 </head>
 <body>
     <h1>Braider Monitor — {{ braider_id }}</h1>
@@ -1515,6 +1538,8 @@ DASHBOARD_HTML = """
                     <label for="serial-input" style="font-size:12px; color:#aaa; width:52px;">Serial</label>
                     <input id="serial-input" type="text" placeholder="—" autocomplete="off"
                         style="flex:1; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 8px; font-size:14px;">
+                    <button onclick="openQrScanner()" title="Scan barcode or QR code"
+                        style="background:#37474f; color:#fff; border:none; border-radius:4px; padding:5px 9px; font-size:14px; cursor:pointer;">📷</button>
                 </div>
                 <div style="display:flex; gap:6px; align-items:center;">
                     <label for="layer-input" style="font-size:12px; color:#aaa; width:52px;">Layer</label>
@@ -1529,6 +1554,17 @@ DASHBOARD_HTML = """
                 </div>
                 <div id="operator-input-status" style="font-size:11px; color:#666; min-height:14px;"></div>
             </div>
+        </div>
+
+        <div id="qr-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.88);
+             z-index:999; align-items:center; justify-content:center; flex-direction:column;">
+            <video id="qr-video" playsinline
+                style="max-width:92vw; max-height:65vh; border-radius:8px; background:#000;"></video>
+            <div id="qr-status" style="color:#eee; margin-top:14px; font-size:14px; text-align:center; max-width:90vw;">
+                Point camera at barcode or QR code…
+            </div>
+            <button onclick="closeQrScanner()"
+                style="margin-top:18px; background:#555; color:#fff; border:none; border-radius:4px; padding:8px 24px; font-size:14px; cursor:pointer;">Cancel</button>
         </div>
 
         <div class="card">
@@ -2162,6 +2198,85 @@ function clearOperatorInput() {
 
 loadOperatorInput();
 setInterval(loadOperatorInput, 5000);
+
+// ── Barcode / QR scanning ───────────────────────────────────────────────────
+// Reads either format from the tag: a Code128 barcode with the raw serial
+// number printed directly (fast path, no network needed), or the QuickBase
+// QR code (resolved via lookup, kept for backward compatibility with tags
+// printed before the barcode existed).
+let qrCodeReader = null;
+
+function openQrScanner() {
+  document.getElementById('qr-modal').style.display = 'flex';
+  document.getElementById('qr-status').textContent = 'Point camera at barcode or QR code…';
+
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.QR_CODE,
+  ]);
+  qrCodeReader = new ZXing.BrowserMultiFormatReader(hints);
+
+  qrCodeReader
+    .decodeFromConstraints(
+      { video: { facingMode: 'environment' } },
+      'qr-video',
+      (result, err) => {
+        if (result) handleQrResult(result.getText());
+      }
+    )
+    .catch(err => {
+      document.getElementById('qr-status').textContent =
+        'Camera access failed: ' + err.message +
+        ' (on iPhone, this page usually needs to be loaded over https:// for camera access to work)';
+    });
+}
+
+function closeQrScanner() {
+  document.getElementById('qr-modal').style.display = 'none';
+  if (qrCodeReader) {
+    qrCodeReader.reset();
+    qrCodeReader = null;
+  }
+}
+
+function parseQbUrl(text) {
+  const re = new RegExp('/table/([a-zA-Z0-9]+)/action/dr' + String.fromCharCode(92) + '?rid=(' + String.fromCharCode(92) + 'd+)');
+  const m = text.match(re);
+  if (!m) return null;
+  return { dbid: m[1], rid: m[2] };
+}
+
+function applyScannedSerial(serial) {
+  document.getElementById('serial-input').value = serial;
+  closeQrScanner();
+  setOperatorInput();
+  showOperatorStatus('Serial set from scan: ' + serial);
+}
+
+function handleQrResult(text) {
+  const parsed = parseQbUrl(text);
+
+  if (!parsed) {
+    applyScannedSerial(text.trim());
+    return;
+  }
+
+  document.getElementById('qr-status').textContent = 'Looking up serial number…';
+  fetch(`/api/qb_lookup_serial?dbid=${encodeURIComponent(parsed.dbid)}&rid=${encodeURIComponent(parsed.rid)}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) {
+        document.getElementById('qr-status').textContent = 'Error: ' + d.error + ' — still scanning…';
+        return;
+      }
+      applyScannedSerial(d.serial_number);
+    })
+    .catch(() => {
+      document.getElementById('qr-status').textContent = 'Lookup failed — network error. Still scanning…';
+    });
+}
+
 </script>
 </body>
 </html>
@@ -2221,6 +2336,62 @@ def api_set_operator_input():
         result = dict(_operator_input)
     log.info(f'Operator input updated: {result}')
     return jsonify(result)
+
+
+@app.route('/api/qb_lookup_serial')
+def api_qb_lookup_serial():
+    """
+    Resolve a serial number from QuickBase, given a table id (dbid) and
+    record id (rid) — both parsed client-side from a scanned QR code's URL,
+    e.g. https://noblegassys.quickbase.com/nav/app/.../table/bsevfksnw/action/dr?rid=1798
+
+    Reads field 33 (Serial Number) of that record via the QuickBase REST API.
+    Requires QB_USER_TOKEN to be configured on this Pi — see qb_config.json.example.
+    """
+    dbid = (request.args.get('dbid') or '').strip()
+    rid  = (request.args.get('rid')  or '').strip()
+
+    if not dbid or not rid:
+        return jsonify({'error': 'Missing dbid or rid'}), 400
+    if not rid.isdigit():
+        return jsonify({'error': 'rid must be numeric'}), 400
+    if not dbid.isalnum():
+        return jsonify({'error': 'dbid looks invalid'}), 400
+    if not QB_USER_TOKEN:
+        return jsonify({'error': 'QuickBase is not configured on this Pi — see qb_config.json.example'}), 501
+
+    try:
+        resp = requests.post(
+            'https://api.quickbase.com/v1/records/query',
+            headers={
+                'QB-Realm-Hostname': QB_REALM,
+                'Authorization':     f'QB-USER-TOKEN {QB_USER_TOKEN}',
+                'Content-Type':      'application/json',
+            },
+            json={
+                'from':   dbid,
+                'select': [33],
+                'where':  f"{{3.EX.'{rid}'}}",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        records = resp.json().get('data', [])
+
+        if not records:
+            return jsonify({'error': f'No record found for rid {rid} in table {dbid}'}), 404
+
+        serial_val = records[0].get('33', {}).get('value')
+        if serial_val in (None, ''):
+            return jsonify({'error': 'Field 33 (Serial Number) is empty for this record'}), 404
+
+        return jsonify({'serial_number': str(serial_val)})
+
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'QuickBase request timed out'}), 504
+    except requests.exceptions.RequestException as e:
+        log.warning(f'QuickBase lookup failed: {e}')
+        return jsonify({'error': f'QuickBase request failed: {e}'}), 502
 
 
 @app.route('/favicon.ico')
