@@ -1464,6 +1464,11 @@ DASHBOARD_HTML = """
         h1    { color:#4fc3f7; margin-bottom:4px; }
         .sub  { color:#888; font-size:13px; margin-bottom:20px; }
         .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+        @media (max-width: 520px) {
+            .grid { grid-template-columns: 1fr; }
+            .card { min-width: 0 !important; }
+            body { padding: 10px; }
+        }
         .card { background:#2a2a2a; border-radius:8px; padding:14px; }
         .label{ font-size:10px; color:#888; text-transform:uppercase; letter-spacing:1px; }
         .value{ font-size:26px; font-weight:bold; margin-top:4px; line-height:1.1; }
@@ -1534,23 +1539,23 @@ DASHBOARD_HTML = """
         <div class="card" style="min-width:230px;">
             <div class="label">Part Tracking</div>
             <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
-                <div style="display:flex; gap:6px; align-items:center;">
-                    <label for="serial-input" style="font-size:12px; color:#aaa; width:52px;">Serial</label>
+                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                    <label for="serial-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Serial</label>
                     <input id="serial-input" type="text" placeholder="—" autocomplete="off"
-                        style="flex:1; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 8px; font-size:14px;">
+                        style="flex:1; min-width:100px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:8px 8px; font-size:14px;">
                     <button onclick="openQrScanner()" title="Scan barcode or QR code"
-                        style="background:#37474f; color:#fff; border:none; border-radius:4px; padding:5px 9px; font-size:14px; cursor:pointer;">📷</button>
+                        style="flex-shrink:0; background:#37474f; color:#fff; border:none; border-radius:4px; width:40px; height:40px; font-size:16px; cursor:pointer;">📷</button>
                 </div>
-                <div style="display:flex; gap:6px; align-items:center;">
-                    <label for="layer-input" style="font-size:12px; color:#aaa; width:52px;">Layer</label>
+                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                    <label for="layer-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Layer</label>
                     <input id="layer-input" type="text" placeholder="—" autocomplete="off"
-                        style="flex:1; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 8px; font-size:14px;">
+                        style="flex:1; min-width:100px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:8px 8px; font-size:14px;">
                 </div>
                 <div style="display:flex; gap:6px; margin-top:2px;">
                     <button onclick="setOperatorInput()"
-                        style="flex:1; background:#2e7d32; color:#fff; border:none; border-radius:4px; padding:6px 0; font-size:12px; cursor:pointer;">Set</button>
+                        style="flex:1; background:#2e7d32; color:#fff; border:none; border-radius:4px; padding:10px 0; font-size:13px; cursor:pointer;">Set</button>
                     <button onclick="clearOperatorInput()"
-                        style="flex:1; background:#555; color:#fff; border:none; border-radius:4px; padding:6px 0; font-size:12px; cursor:pointer;">Clear</button>
+                        style="flex:1; background:#555; color:#fff; border:none; border-radius:4px; padding:10px 0; font-size:13px; cursor:pointer;">Clear</button>
                 </div>
                 <div id="operator-input-status" style="font-size:11px; color:#666; min-height:14px;"></div>
             </div>
