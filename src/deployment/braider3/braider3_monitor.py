@@ -29,7 +29,7 @@ import logging
 from datetime import datetime
 from collections import deque
 from pycomm3 import LogixDriver
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -532,6 +532,19 @@ def calculate_daily_state_percentages():
     return {state: round((count / total_rows) * 100, 1) for state, count in state_counts.items()}
 
 
+# ── Operator-entered serial/layer tracking ─────────────────────────────────────
+# Set from the dashboard (POST /api/set_operator_input). Read into every
+# process_log.csv row so each row can be tied back to a physical part.
+# Not derived from the PLC — purely an operator-typed label, so it persists
+# until an operator changes or clears it (empty string = cleared / no value).
+
+_operator_lock = threading.Lock()
+_operator_input = {
+    'serial_number': '',
+    'layer_number':  '',
+}
+
+
 # ── Shared state ──────────────────────────────────────────────────────────────
 
 _lock = threading.Lock()
@@ -1020,10 +1033,17 @@ def monitor_loop():
                         pending_oee['State_Name']    = state_name(machine_state) if machine_state is not None else ''
                         write_csv_row(OEE_LOG, pending_oee)
 
+                    # ── Operator-entered serial/layer (from dashboard) ────────
+                    with _operator_lock:
+                        serial_number = _operator_input['serial_number']
+                        layer_number  = _operator_input['layer_number']
+
                     # ── Process log row ──────────────────────────────────────
                     process_row = {
                         'Timestamp':             timestamp,
                         'Braider_ID':            BRAIDER_ID,
+                        'Serial_Number':         serial_number,
+                        'Layer_Number':          layer_number,
                         'Machine_State':         machine_state,
                         'State_Name':            state_name(machine_state) if machine_state is not None else '',
                         'Table_Speed':           round(table_speed, 6)  if table_speed  else None,
@@ -1406,6 +1426,29 @@ DASHBOARD_HTML = """
                 {% if d.recipe_modified %}&nbsp;<span class="warn">modified</span>{% endif %}
                 {% if d.mandrel_mode %}&nbsp;| mandrel{% endif %}
                 {% if d.sensor_mode %}&nbsp;| <span class="ok">sensor</span>{% endif %}
+            </div>
+        </div>
+
+        <div class="card" style="min-width:230px;">
+            <div class="label">Part Tracking</div>
+            <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+                <div style="display:flex; gap:6px; align-items:center;">
+                    <label for="serial-input" style="font-size:12px; color:#aaa; width:52px;">Serial</label>
+                    <input id="serial-input" type="text" placeholder="—" autocomplete="off"
+                        style="flex:1; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 8px; font-size:14px;">
+                </div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                    <label for="layer-input" style="font-size:12px; color:#aaa; width:52px;">Layer</label>
+                    <input id="layer-input" type="text" placeholder="—" autocomplete="off"
+                        style="flex:1; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 8px; font-size:14px;">
+                </div>
+                <div style="display:flex; gap:6px; margin-top:2px;">
+                    <button onclick="setOperatorInput()"
+                        style="flex:1; background:#2e7d32; color:#fff; border:none; border-radius:4px; padding:6px 0; font-size:12px; cursor:pointer;">Set</button>
+                    <button onclick="clearOperatorInput()"
+                        style="flex:1; background:#555; color:#fff; border:none; border-radius:4px; padding:6px 0; font-size:12px; cursor:pointer;">Clear</button>
+                </div>
+                <div id="operator-input-status" style="font-size:11px; color:#666; min-height:14px;"></div>
             </div>
         </div>
 
@@ -1967,6 +2010,57 @@ async function fetchAndUpdate() {
 window.addEventListener('resize', drawChart);
 setInterval(fetchAndUpdate, 2000);
 fetchAndUpdate();
+
+// ── Operator serial/layer tracking ──────────────────────────────────────────
+function showOperatorStatus(msg, isError) {
+  const el = document.getElementById('operator-input-status');
+  el.textContent = msg;
+  el.style.color = isError ? '#ef5350' : '#66bb6a';
+  clearTimeout(showOperatorStatus._t);
+  showOperatorStatus._t = setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+function loadOperatorInput() {
+  fetch('/api/operator_input')
+    .then(r => r.json())
+    .then(d => {
+      const serialEl = document.getElementById('serial-input');
+      const layerEl  = document.getElementById('layer-input');
+      if (!serialEl || !layerEl) return;
+      if (document.activeElement !== serialEl) serialEl.value = d.serial_number || '';
+      if (document.activeElement !== layerEl)  layerEl.value  = d.layer_number  || '';
+    })
+    .catch(() => {});
+}
+
+function setOperatorInput() {
+  const serial_number = document.getElementById('serial-input').value;
+  const layer_number  = document.getElementById('layer-input').value;
+  fetch('/api/set_operator_input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serial_number, layer_number })
+  })
+    .then(r => r.json())
+    .then(() => showOperatorStatus('Saved'))
+    .catch(() => showOperatorStatus('Failed to save', true));
+}
+
+function clearOperatorInput() {
+  document.getElementById('serial-input').value = '';
+  document.getElementById('layer-input').value = '';
+  fetch('/api/set_operator_input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serial_number: '', layer_number: '' })
+  })
+    .then(r => r.json())
+    .then(() => showOperatorStatus('Cleared'))
+    .catch(() => showOperatorStatus('Failed to clear', true));
+}
+
+loadOperatorInput();
+setInterval(loadOperatorInput, 5000);
 </script>
 </body>
 </html>
@@ -1993,6 +2087,32 @@ def dashboard():
 def api_latest():
     with _lock:
         return jsonify(_latest)
+
+
+@app.route('/api/operator_input')
+def api_get_operator_input():
+    """Current operator-entered serial number / layer number."""
+    with _operator_lock:
+        return jsonify(_operator_input)
+
+
+@app.route('/api/set_operator_input', methods=['POST'])
+def api_set_operator_input():
+    """
+    Set (or clear) the operator-entered serial number / layer number.
+    Accepts JSON: {"serial_number": "...", "layer_number": "..."}.
+    Either key is optional — only keys present in the request are updated.
+    Send an empty string to clear a field.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    with _operator_lock:
+        if 'serial_number' in data:
+            _operator_input['serial_number'] = (data.get('serial_number') or '').strip()
+        if 'layer_number' in data:
+            _operator_input['layer_number'] = (data.get('layer_number') or '').strip()
+        result = dict(_operator_input)
+    log.info(f'Operator input updated: {result}')
+    return jsonify(result)
 
 
 @app.route('/favicon.ico')
