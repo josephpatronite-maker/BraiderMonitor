@@ -1565,10 +1565,26 @@ DASHBOARD_HTML = """
                     <input type="file" id="photo-scan-input" accept="image/*" capture="environment"
                         style="display:none;" onchange="handlePhotoScan(this)">
                 </div>
-                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                    <label for="layer-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Layer</label>
-                    <input id="layer-input" type="text" placeholder="—" autocomplete="off"
-                        style="flex:1; min-width:100px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:8px 8px; font-size:14px;">
+                <div>
+                    <label style="font-size:12px; color:#aaa;">Layer</label>
+                    <div id="layer-quick-buttons" style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">
+                        <button type="button" class="layer-btn" data-layer="1" onclick="setLayerQuick(1)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">1</button>
+                        <button type="button" class="layer-btn" data-layer="2" onclick="setLayerQuick(2)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">2</button>
+                        <button type="button" class="layer-btn" data-layer="3" onclick="setLayerQuick(3)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">3</button>
+                        <button type="button" class="layer-btn" data-layer="4" onclick="setLayerQuick(4)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">4</button>
+                        <button type="button" class="layer-btn" data-layer="5" onclick="setLayerQuick(5)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">5</button>
+                        <button type="button" class="layer-btn" data-layer="6" onclick="setLayerQuick(6)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">6</button>
+                        <button type="button" class="layer-btn" data-layer="7" onclick="setLayerQuick(7)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">7</button>
+                        <button type="button" class="layer-btn" data-layer="8" onclick="setLayerQuick(8)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">8</button>
+                        <button type="button" class="layer-btn" data-layer="9" onclick="setLayerQuick(9)" style="width:32px; height:32px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:14px; cursor:pointer;">9</button>
+                    </div>
+                    <div style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+                        <input id="layer-input-manual" type="text" inputmode="numeric" placeholder="10+" autocomplete="off"
+                            style="width:64px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:14px;">
+                        <button type="button" onclick="setLayerManual()"
+                            style="background:#37474f; color:#fff; border:none; border-radius:4px; padding:6px 12px; font-size:13px; cursor:pointer;">Set</button>
+                    </div>
+                    <input type="hidden" id="layer-input">
                 </div>
                 <div style="display:flex; gap:6px; margin-top:2px;">
                     <button onclick="setOperatorInput()"
@@ -2170,15 +2186,31 @@ function showOperatorStatus(msg, isError) {
   showOperatorStatus._t = setTimeout(() => { el.textContent = ''; }, 3000);
 }
 
+function highlightLayerButton(layerValue) {
+  document.querySelectorAll('.layer-btn').forEach(btn => {
+    const isActive = btn.dataset.layer === String(layerValue);
+    btn.style.background = isActive ? '#2e7d32' : '#333';
+    btn.style.borderColor = isActive ? '#2e7d32' : '#555';
+  });
+}
+
 function loadOperatorInput() {
   fetch('/api/operator_input')
     .then(r => r.json())
     .then(d => {
       // Don't stomp on text the operator is actively typing
       const serialEl = document.getElementById('serial-input');
-      const layerEl  = document.getElementById('layer-input');
+      const manualEl = document.getElementById('layer-input-manual');
       if (document.activeElement !== serialEl) serialEl.value = d.serial_number || '';
-      if (document.activeElement !== layerEl)  layerEl.value  = d.layer_number  || '';
+
+      document.getElementById('layer-input').value = d.layer_number || '';
+      highlightLayerButton(d.layer_number || '');
+      // Only reflect into the manual field if it's showing a >9 value (or
+      // empty) and isn't currently being typed into
+      if (document.activeElement !== manualEl) {
+        const n = parseInt(d.layer_number, 10);
+        manualEl.value = (d.layer_number && (isNaN(n) || n > 9)) ? d.layer_number : '';
+      }
     })
     .catch(() => {});
 }
@@ -2196,9 +2228,43 @@ function setOperatorInput() {
     .catch(() => showOperatorStatus('Failed to save', true));
 }
 
+function setLayerQuick(n) {
+  document.getElementById('layer-input').value = String(n);
+  document.getElementById('layer-input-manual').value = '';
+  highlightLayerButton(n);
+  fetch('/api/set_operator_input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ layer_number: String(n) })
+  })
+    .then(r => r.json())
+    .then(() => showOperatorStatus('Layer set to ' + n))
+    .catch(() => showOperatorStatus('Failed to save', true));
+}
+
+function setLayerManual() {
+  const v = document.getElementById('layer-input-manual').value.trim();
+  if (!v) return;
+  document.getElementById('layer-input').value = v;
+  highlightLayerButton(v);
+  fetch('/api/set_operator_input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ layer_number: v })
+  })
+    .then(r => r.json())
+    .then(() => showOperatorStatus('Layer set to ' + v))
+    .catch(() => showOperatorStatus('Failed to save', true));
+}
+document.getElementById('layer-input-manual').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); setLayerManual(); }
+});
+
 function clearOperatorInput() {
   document.getElementById('serial-input').value = '';
   document.getElementById('layer-input').value = '';
+  document.getElementById('layer-input-manual').value = '';
+  highlightLayerButton('');
   fetch('/api/set_operator_input', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
