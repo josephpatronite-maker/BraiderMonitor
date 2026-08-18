@@ -28,7 +28,6 @@ Author: Joseph Patronite, Noble Gas Systems
 
 import csv
 import json
-import requests
 
 # Optional — only needed for server-side photo decoding (the HTTP-friendly
 # alternative to live camera scanning, which needs HTTPS). If not installed,
@@ -642,25 +641,6 @@ _operator_input = {
     'layer_number':  '',
 }
 
-# ── QuickBase config (optional — only needed for the QR-scan lookup) ──────────
-# Loaded from environment variables first, falling back to a local
-# qb_config.json file. qb_config.json is git-ignored on purpose — it holds a
-# real credential and must never be committed. See qb_config.json.example
-# for the expected format. If neither is present, the QR-scan feature simply
-# returns a clear "not configured" error and everything else keeps working.
-QB_REALM      = os.environ.get('QB_REALM', 'noblegassys.quickbase.com')
-QB_USER_TOKEN = os.environ.get('QB_USER_TOKEN')
-
-if not QB_USER_TOKEN:
-    _qb_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qb_config.json')
-    if os.path.exists(_qb_config_path):
-        try:
-            with open(_qb_config_path) as _f:
-                _qb_cfg = json.load(_f)
-            QB_REALM      = _qb_cfg.get('realm', QB_REALM)
-            QB_USER_TOKEN = _qb_cfg.get('user_token')
-        except Exception as _e:
-            log.warning(f'Could not load qb_config.json: {_e}')
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -2292,15 +2272,6 @@ function closeQrScanner() {
   }
 }
 
-function parseQbUrl(text) {
-  // Matches .../table/<dbid>/action/dr?rid=<number> — only true for the
-  // QuickBase QR code, never for the plain-text serial barcode.
-  const re = new RegExp('/table/([a-zA-Z0-9]+)/action/dr\\?rid=(\\d+)');
-  const m = text.match(re);
-  if (!m) return null;
-  return { dbid: m[1], rid: m[2] };
-}
-
 function applyScannedSerial(serial) {
   document.getElementById('serial-input').value = serial;
   closeQrScanner();
@@ -2329,23 +2300,7 @@ function handlePhotoScan(inputEl) {
         showOperatorStatus(d.error, true);
         return;
       }
-      // Reuses the same QuickBase-URL-vs-plain-serial logic as the live scanner
-      const parsed = parseQbUrl(d.text);
-      if (!parsed) {
-        applyScannedSerial(d.text.trim());
-        return;
-      }
-      showOperatorStatus('Looking up serial number…');
-      fetch(`/api/qb_lookup_serial?dbid=${encodeURIComponent(parsed.dbid)}&rid=${encodeURIComponent(parsed.rid)}`)
-        .then(r => r.json())
-        .then(dd => {
-          if (dd.error) {
-            showOperatorStatus(dd.error, true);
-            return;
-          }
-          applyScannedSerial(dd.serial_number);
-        })
-        .catch(() => showOperatorStatus('Lookup failed — network error', true));
+      applyScannedSerial(d.text.trim());
     })
     .catch(() => {
       inputEl.value = '';
@@ -2354,29 +2309,7 @@ function handlePhotoScan(inputEl) {
 }
 
 function handleQrResult(text) {
-  const parsed = parseQbUrl(text);
-
-  if (!parsed) {
-    // Not a QuickBase URL — treat the scanned text as the literal serial
-    // number (the Code128 barcode case). No lookup needed.
-    applyScannedSerial(text.trim());
-    return;
-  }
-
-  // QuickBase QR code — resolve the serial via the API, same as before.
-  document.getElementById('qr-status').textContent = 'Looking up serial number…';
-  fetch(`/api/qb_lookup_serial?dbid=${encodeURIComponent(parsed.dbid)}&rid=${encodeURIComponent(parsed.rid)}`)
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) {
-        document.getElementById('qr-status').textContent = 'Error: ' + d.error + ' — still scanning…';
-        return;
-      }
-      applyScannedSerial(d.serial_number);
-    })
-    .catch(() => {
-      document.getElementById('qr-status').textContent = 'Lookup failed — network error. Still scanning…';
-    });
+  applyScannedSerial(text.trim());
 }
 </script>
 </body>
@@ -2438,96 +2371,6 @@ def api_set_operator_input():
         result = dict(_operator_input)
     log.info(f'Operator input updated: {result}')
     return jsonify(result)
-
-
-@app.route('/api/qb_lookup_serial')
-def api_qb_lookup_serial():
-    """
-    Resolve a serial number from QuickBase, given a table id (dbid) and
-    record id (rid) — both parsed client-side from a scanned QR code's URL,
-    e.g. https://noblegassys.quickbase.com/nav/app/.../table/bsevfksnw/action/dr?rid=1798
-
-    Reads field 33 (Serial Number) of that record via the QuickBase REST API.
-    Requires QB_USER_TOKEN to be configured on this Pi — see qb_config.json.example.
-    """
-    dbid = (request.args.get('dbid') or '').strip()
-    rid  = (request.args.get('rid')  or '').strip()
-
-    if not dbid or not rid:
-        return jsonify({'error': 'Missing dbid or rid'}), 400
-    if not rid.isdigit():
-        return jsonify({'error': 'rid must be numeric'}), 400
-    if not dbid.isalnum():
-        return jsonify({'error': 'dbid looks invalid'}), 400
-    if not QB_USER_TOKEN:
-        return jsonify({'error': 'QuickBase is not configured on this Pi — see qb_config.json.example'}), 501
-
-    try:
-        resp = requests.post(
-            'https://api.quickbase.com/v1/records/query',
-            headers={
-                'QB-Realm-Hostname': QB_REALM,
-                'Authorization':     f'QB-USER-TOKEN {QB_USER_TOKEN}',
-                'Content-Type':      'application/json',
-            },
-            json={
-                'from':   dbid,
-                'select': [33],
-                'where':  f"{{3.EX.'{rid}'}}",   # field 3 = QuickBase's built-in Record ID#
-            },
-            timeout=8,
-        )
-        resp.raise_for_status()
-        records = resp.json().get('data', [])
-
-        if not records:
-            return jsonify({'error': f'No record found for rid {rid} in table {dbid}'}), 404
-
-        serial_val = records[0].get('33', {}).get('value')
-        if serial_val in (None, ''):
-            return jsonify({'error': 'Field 33 (Serial Number) is empty for this record'}), 404
-
-        return jsonify({'serial_number': str(serial_val)})
-
-    except requests.exceptions.Timeout:
-        return jsonify({'error': 'QuickBase request timed out'}), 504
-    except requests.exceptions.RequestException as e:
-        log.warning(f'QuickBase lookup failed: {e}')
-        return jsonify({'error': f'QuickBase request failed: {e}'}), 502
-
-
-@app.route('/api/decode_barcode_image', methods=['POST'])
-def api_decode_barcode_image():
-    """
-    Decodes a barcode or QR code from a single uploaded photo. This is the
-    HTTP-friendly alternative to live camera scanning: a native photo
-    capture (<input type="file" capture>) isn't subject to the same
-    secure-context requirement that getUserMedia is, so this works on plain
-    http:// — no cert/HTTPS setup needed. Trade-off: the operator takes one
-    photo and waits for a round-trip, rather than a live continuous scan.
-    Accepts a single image file under the 'image' form field.
-    """
-    if not _PHOTO_DECODE_AVAILABLE:
-        return jsonify({'error': 'Photo scanning is not set up on this Pi — run: '
-                                  'pip3 install pyzbar pillow --break-system-packages '
-                                  '(and sudo apt-get install -y libzbar0), then restart the service'}), 501
-
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image received'}), 400
-
-    file = request.files['image']
-    try:
-        img = Image.open(file.stream).convert('L')  # grayscale decodes more reliably
-    except Exception as e:
-        return jsonify({'error': f'Could not read the photo: {e}'}), 400
-
-    results = zbar_decode(img)
-    if not results:
-        return jsonify({'error': 'No barcode or QR code found in that photo — try getting closer, '
-                                  'reducing glare, or holding the phone steadier'}), 404
-
-    text = results[0].data.decode('utf-8', errors='replace')
-    return jsonify({'text': text})
 
 
 @app.route('/favicon.ico')
