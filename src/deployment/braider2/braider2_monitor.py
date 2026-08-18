@@ -1476,7 +1476,6 @@ DASHBOARD_HTML = """
         .axis-warn { background:#b71c1c; color:#ef9a9a; }
         .checks { font-size:14px; line-height:2; }
     </style>
-    <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 </head>
 <body>
     <h1>Braider Monitor — {{ braider_id }}</h1>
@@ -1534,9 +1533,7 @@ DASHBOARD_HTML = """
                     <label for="serial-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Serial</label>
                     <input id="serial-input" type="text" placeholder="—" autocomplete="off"
                         style="flex:1; min-width:100px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:8px 8px; font-size:14px;">
-                    <button onclick="openQrScanner()" title="Live scan (needs https://)"
-                        style="flex-shrink:0; background:#37474f; color:#fff; border:none; border-radius:4px; width:40px; height:40px; font-size:16px; cursor:pointer;">📷</button>
-                    <button onclick="document.getElementById('photo-scan-input').click()" title="Take a photo of barcode or QR code (works over http)"
+                    <button onclick="document.getElementById('photo-scan-input').click()" title="Take a photo of barcode or QR code"
                         style="flex-shrink:0; background:#37474f; color:#fff; border:none; border-radius:4px; width:40px; height:40px; font-size:16px; cursor:pointer;">📁</button>
                     <input type="file" id="photo-scan-input" accept="image/*" capture="environment"
                         style="display:none;" onchange="handlePhotoScan(this)">
@@ -1554,17 +1551,6 @@ DASHBOARD_HTML = """
                 </div>
                 <div id="operator-input-status" style="font-size:11px; color:#666; min-height:14px;"></div>
             </div>
-        </div>
-
-        <div id="qr-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.88);
-             z-index:999; align-items:center; justify-content:center; flex-direction:column;">
-            <video id="qr-video" playsinline
-                style="max-width:92vw; max-height:65vh; border-radius:8px; background:#000;"></video>
-            <div id="qr-status" style="color:#eee; margin-top:14px; font-size:14px; text-align:center; max-width:90vw;">
-                Point camera at barcode or QR code…
-            </div>
-            <button onclick="closeQrScanner()"
-                style="margin-top:18px; background:#555; color:#fff; border:none; border-radius:4px; padding:8px 24px; font-size:14px; cursor:pointer;">Cancel</button>
         </div>
 
         <div class="card">
@@ -2199,71 +2185,65 @@ function clearOperatorInput() {
 loadOperatorInput();
 setInterval(loadOperatorInput, 5000);
 
-// ── Barcode / QR scanning ───────────────────────────────────────────────────
-// Reads either format from the tag: a Code128 barcode with the raw serial
-// number printed directly (fast path, no network needed), or the QuickBase
-// QR code (resolved via lookup, kept for backward compatibility with tags
-// printed before the barcode existed).
-let qrCodeReader = null;
+// ── Photo-upload scanning (works over plain http://) ────────────────────────
+// Photos are downscaled client-side before upload — a full-resolution phone
+// photo can be several MB, which is unnecessary for barcode decoding and
+// can be slow (or fail outright) to upload over a weak WiFi signal on the
+// floor. Longest side capped at 1600px, re-encoded as JPEG.
+const PHOTO_SCAN_MAX_DIMENSION = 1600;
+const PHOTO_SCAN_JPEG_QUALITY = 0.85;
 
-function openQrScanner() {
-  document.getElementById('qr-modal').style.display = 'flex';
-  document.getElementById('qr-status').textContent = 'Point camera at barcode or QR code…';
+function downscaleImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
 
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    ZXing.BarcodeFormat.CODE_128,
-    ZXing.BarcodeFormat.QR_CODE,
-  ]);
-  qrCodeReader = new ZXing.BrowserMultiFormatReader(hints);
-
-  qrCodeReader
-    .decodeFromConstraints(
-      { video: { facingMode: 'environment' } },
-      'qr-video',
-      (result, err) => {
-        if (result) handleQrResult(result.getText());
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      const longest = Math.max(width, height);
+      if (longest > PHOTO_SCAN_MAX_DIMENSION) {
+        const scale = PHOTO_SCAN_MAX_DIMENSION / longest;
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
       }
-    )
-    .catch(err => {
-      const isHttps = window.location.protocol === 'https:';
-      document.getElementById('qr-status').textContent =
-        'Camera access failed: ' + err.message +
-        (isHttps
-          ? ''
-          : ' — this page is loaded over http://, which iPhone blocks camera access on. Ask your admin to set up HTTPS (see HTTPS_Setup.md), then reload this page at https://' + window.location.host + window.location.pathname);
-    });
-}
-
-function closeQrScanner() {
-  document.getElementById('qr-modal').style.display = 'none';
-  if (qrCodeReader) {
-    qrCodeReader.reset();
-    qrCodeReader = null;
-  }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        blob => blob ? resolve(blob) : reject(new Error('Could not process image')),
+        'image/jpeg',
+        PHOTO_SCAN_JPEG_QUALITY
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not load photo'));
+    };
+    img.src = url;
+  });
 }
 
 function applyScannedSerial(serial) {
   document.getElementById('serial-input').value = serial;
-  closeQrScanner();
   setOperatorInput();
   showOperatorStatus('Serial set from scan: ' + serial);
 }
 
-// ── Photo-upload scanning (works over plain http://, no HTTPS needed) ──────
-// Native photo capture isn't subject to the secure-context requirement that
-// live camera streaming (getUserMedia) is, so this is the fallback path for
-// Pis that haven't set up a certificate. One photo, one round-trip to the
-// server for decoding, instead of a live continuous scan.
 function handlePhotoScan(inputEl) {
   const file = inputEl.files[0];
   if (!file) return;
 
-  showOperatorStatus('Reading photo…');
-  const formData = new FormData();
-  formData.append('image', file);
+  showOperatorStatus('Processing photo…');
 
-  fetch('/api/decode_barcode_image', { method: 'POST', body: formData })
+  downscaleImage(file)
+    .then(blob => {
+      showOperatorStatus('Reading photo…');
+      const formData = new FormData();
+      formData.append('image', blob, 'scan.jpg');
+      return fetch('/api/decode_barcode_image', { method: 'POST', body: formData });
+    })
     .then(r => r.json())
     .then(d => {
       inputEl.value = '';
@@ -2277,10 +2257,6 @@ function handlePhotoScan(inputEl) {
       inputEl.value = '';
       showOperatorStatus('Photo upload failed — network error', true);
     });
-}
-
-function handleQrResult(text) {
-  applyScannedSerial(text.trim());
 }
 </script>
 </body>
@@ -3318,9 +3294,9 @@ if __name__ == '__main__':
 
     if os.path.exists(_cert_path) and os.path.exists(_key_path):
         log.info('Dashboard: https://0.0.0.0:5000  |  Floor: https://0.0.0.0:5000/floor  (HTTPS — cert.pem found)')
-        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False,
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True,
                 ssl_context=(_cert_path, _key_path))
     else:
         log.info('Dashboard: http://0.0.0.0:5000  |  Floor: http://0.0.0.0:5000/floor  '
                   '(plain HTTP — camera scanning will not work on iPhone until cert.pem/key.pem exist; see HTTPS_Setup.md)')
-        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
