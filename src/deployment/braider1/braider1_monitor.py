@@ -2213,45 +2213,6 @@ loadOperatorInput();
 setInterval(loadOperatorInput, 5000);
 
 // ── Photo-upload scanning (works over plain http://) ────────────────────────
-// Photos are downscaled client-side before upload — a full-resolution phone
-// photo can be several MB, which is unnecessary for barcode decoding and
-// can be slow (or fail outright) to upload over a weak WiFi signal on the
-// floor. Longest side capped at 1600px, re-encoded as JPEG.
-const PHOTO_SCAN_MAX_DIMENSION = 1600;
-const PHOTO_SCAN_JPEG_QUALITY = 0.85;
-
-function downscaleImage(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      let { width, height } = img;
-      const longest = Math.max(width, height);
-      if (longest > PHOTO_SCAN_MAX_DIMENSION) {
-        const scale = PHOTO_SCAN_MAX_DIMENSION / longest;
-        width = Math.round(width * scale);
-        height = Math.round(height * scale);
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-      canvas.toBlob(
-        blob => blob ? resolve(blob) : reject(new Error('Could not process image')),
-        'image/jpeg',
-        PHOTO_SCAN_JPEG_QUALITY
-      );
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('Could not load photo'));
-    };
-    img.src = url;
-  });
-}
-
 function applyScannedSerial(serial) {
   document.getElementById('serial-input').value = serial;
   setOperatorInput();
@@ -2262,21 +2223,11 @@ function handlePhotoScan(inputEl) {
   const file = inputEl.files[0];
   if (!file) return;
 
-  showOperatorStatus('Processing photo…');
+  showOperatorStatus('Reading photo…');
+  const formData = new FormData();
+  formData.append('image', file);
 
-  downscaleImage(file)
-    .catch(err => {
-      // Downscaling failed (e.g. a photo format the browser can't draw to
-      // a canvas) — don't block the scan, just upload the original photo.
-      console.warn('Downscale failed, using original photo:', err);
-      return file;
-    })
-    .then(blobOrFile => {
-      showOperatorStatus('Reading photo…');
-      const formData = new FormData();
-      formData.append('image', blobOrFile, 'scan.jpg');
-      return fetch('/api/decode_barcode_image', { method: 'POST', body: formData });
-    })
+  fetch('/api/decode_barcode_image', { method: 'POST', body: formData })
     .then(r => r.json())
     .then(d => {
       inputEl.value = '';  // reset so the same photo can be reselected later if needed
