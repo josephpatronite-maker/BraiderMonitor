@@ -2238,10 +2238,14 @@ function handlePhotoScan(inputEl) {
   showOperatorStatus('Processing photo…');
 
   downscaleImage(file)
-    .then(blob => {
+    .catch(err => {
+      console.warn('Downscale failed, using original photo:', err);
+      return file;
+    })
+    .then(blobOrFile => {
       showOperatorStatus('Reading photo…');
       const formData = new FormData();
-      formData.append('image', blob, 'scan.jpg');
+      formData.append('image', blobOrFile, 'scan.jpg');
       return fetch('/api/decode_barcode_image', { method: 'POST', body: formData });
     })
     .then(r => r.json())
@@ -2253,9 +2257,9 @@ function handlePhotoScan(inputEl) {
       }
       applyScannedSerial(d.text.trim());
     })
-    .catch(() => {
+    .catch(err => {
       inputEl.value = '';
-      showOperatorStatus('Photo upload failed — network error', true);
+      showOperatorStatus('Upload failed: ' + (err && err.message ? err.message : 'unknown error'), true);
     });
 }
 </script>
