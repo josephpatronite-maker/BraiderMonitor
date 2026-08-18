@@ -24,6 +24,16 @@ Author: Joseph Patronite, Noble Gas Systems
 import csv
 import json
 import requests
+
+# Optional — only needed for server-side photo decoding (the HTTP-friendly
+# alternative to live camera scanning, which needs HTTPS). If not installed,
+# that one feature returns a clear error instead of crashing the whole app.
+try:
+    from PIL import Image
+    from pyzbar.pyzbar import decode as zbar_decode
+    _PHOTO_DECODE_AVAILABLE = True
+except ImportError:
+    _PHOTO_DECODE_AVAILABLE = False
 import os
 import time
 import threading
@@ -1465,8 +1475,12 @@ DASHBOARD_HTML = """
                     <label for="serial-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Serial</label>
                     <input id="serial-input" type="text" placeholder="—" autocomplete="off"
                         style="flex:1; min-width:100px; background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:8px 8px; font-size:14px;">
-                    <button onclick="openQrScanner()" title="Scan barcode or QR code"
+                    <button onclick="openQrScanner()" title="Live scan (needs https://)"
                         style="flex-shrink:0; background:#37474f; color:#fff; border:none; border-radius:4px; width:40px; height:40px; font-size:16px; cursor:pointer;">📷</button>
+                    <button onclick="document.getElementById('photo-scan-input').click()" title="Take a photo of barcode or QR code (works over http)"
+                        style="flex-shrink:0; background:#37474f; color:#fff; border:none; border-radius:4px; width:40px; height:40px; font-size:16px; cursor:pointer;">📁</button>
+                    <input type="file" id="photo-scan-input" accept="image/*" capture="environment"
+                        style="display:none;" onchange="handlePhotoScan(this)">
                 </div>
                 <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
                     <label for="layer-input" style="font-size:12px; color:#aaa; width:52px; flex-shrink:0;">Layer</label>
@@ -2162,6 +2176,46 @@ function applyScannedSerial(serial) {
   showOperatorStatus('Serial set from scan: ' + serial);
 }
 
+// ── Photo-upload scanning (works over plain http://, no HTTPS needed) ──────
+function handlePhotoScan(inputEl) {
+  const file = inputEl.files[0];
+  if (!file) return;
+
+  showOperatorStatus('Reading photo…');
+  const formData = new FormData();
+  formData.append('image', file);
+
+  fetch('/api/decode_barcode_image', { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(d => {
+      inputEl.value = '';
+      if (d.error) {
+        showOperatorStatus(d.error, true);
+        return;
+      }
+      const parsed = parseQbUrl(d.text);
+      if (!parsed) {
+        applyScannedSerial(d.text.trim());
+        return;
+      }
+      showOperatorStatus('Looking up serial number…');
+      fetch(`/api/qb_lookup_serial?dbid=${encodeURIComponent(parsed.dbid)}&rid=${encodeURIComponent(parsed.rid)}`)
+        .then(r => r.json())
+        .then(dd => {
+          if (dd.error) {
+            showOperatorStatus(dd.error, true);
+            return;
+          }
+          applyScannedSerial(dd.serial_number);
+        })
+        .catch(() => showOperatorStatus('Lookup failed — network error', true));
+    })
+    .catch(() => {
+      inputEl.value = '';
+      showOperatorStatus('Photo upload failed — network error', true);
+    });
+}
+
 function handleQrResult(text) {
   const parsed = parseQbUrl(text);
 
@@ -2293,6 +2347,40 @@ def api_qb_lookup_serial():
     except requests.exceptions.RequestException as e:
         log.warning(f'QuickBase lookup failed: {e}')
         return jsonify({'error': f'QuickBase request failed: {e}'}), 502
+
+
+@app.route('/api/decode_barcode_image', methods=['POST'])
+def api_decode_barcode_image():
+    """
+    Decodes a barcode or QR code from a single uploaded photo. This is the
+    HTTP-friendly alternative to live camera scanning: a native photo
+    capture (<input type="file" capture>) isn't subject to the same
+    secure-context requirement that getUserMedia is, so this works on plain
+    http:// — no cert/HTTPS setup needed. Trade-off: the operator takes one
+    photo and waits for a round-trip, rather than a live continuous scan.
+    Accepts a single image file under the 'image' form field.
+    """
+    if not _PHOTO_DECODE_AVAILABLE:
+        return jsonify({'error': 'Photo scanning is not set up on this Pi — run: '
+                                  'pip3 install pyzbar pillow --break-system-packages '
+                                  '(and sudo apt-get install -y libzbar0), then restart the service'}), 501
+
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image received'}), 400
+
+    file = request.files['image']
+    try:
+        img = Image.open(file.stream).convert('L')  # grayscale decodes more reliably
+    except Exception as e:
+        return jsonify({'error': f'Could not read the photo: {e}'}), 400
+
+    results = zbar_decode(img)
+    if not results:
+        return jsonify({'error': 'No barcode or QR code found in that photo — try getting closer, '
+                                  'reducing glare, or holding the phone steadier'}), 404
+
+    text = results[0].data.decode('utf-8', errors='replace')
+    return jsonify({'text': text})
 
 
 @app.route('/favicon.ico')
