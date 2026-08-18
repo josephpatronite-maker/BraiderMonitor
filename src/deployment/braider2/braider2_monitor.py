@@ -2223,6 +2223,20 @@ function handlePhotoScan(inputEl) {
 app = Flask(__name__)
 
 
+@app.after_request
+def add_no_cache_headers(response):
+    """
+    Prevent phones (Safari especially) from caching the dashboard/floor HTML.
+    Without this, a phone can keep running an old cached copy of the page's
+    JavaScript indefinitely after the server is updated — confusing to debug,
+    since the server logs show nothing wrong and the deployed code is correct.
+    Only applies to HTML responses; doesn't affect JSON API calls.
+    """
+    if response.content_type and 'text/html' in response.content_type:
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
+
+
 @app.route('/')
 def dashboard():
     with _lock:
@@ -2274,6 +2288,39 @@ def api_set_operator_input():
         result = dict(_operator_input)
     log.info(f'Operator input updated: {result}')
     return jsonify(result)
+
+
+@app.route('/api/decode_barcode_image', methods=['POST'])
+def api_decode_barcode_image():
+    """
+    Decodes a barcode or QR code from a single uploaded photo.
+    Requires pyzbar + pillow to be installed on this Pi (see
+    install_dependencies.sh or the manual pip3/apt-get commands in
+    the deployment guide) — otherwise returns a clear "not set up" error.
+    Accepts a single image file under the 'image' form field.
+    """
+    if not _PHOTO_DECODE_AVAILABLE:
+        return jsonify({'error': 'Photo scanning is not set up on this Pi — run: '
+                                  'sudo apt-get install -y libzbar0 && '
+                                  'pip3 install --break-system-packages pyzbar pillow, '
+                                  'then restart the service'}), 501
+
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image received'}), 400
+
+    file = request.files['image']
+    try:
+        img = Image.open(file.stream).convert('L')  # grayscale decodes more reliably
+    except Exception as e:
+        return jsonify({'error': f'Could not read the photo: {e}'}), 400
+
+    results = zbar_decode(img)
+    if not results:
+        return jsonify({'error': 'No barcode or QR code found in that photo — try getting closer, '
+                                  'reducing glare, or holding the phone steadier'}), 404
+
+    text = results[0].data.decode('utf-8', errors='replace')
+    return jsonify({'text': text})
 
 
 @app.route('/favicon.ico')
