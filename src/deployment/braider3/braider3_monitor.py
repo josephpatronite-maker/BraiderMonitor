@@ -1392,6 +1392,7 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Braider Monitor — Noble Gas Systems</title>
     <style>
         body  { font-family: monospace; background:#1a1a1a; color:#e0e0e0; padding:20px; margin:0; }
@@ -2130,9 +2131,12 @@ function openQrScanner() {
       }
     )
     .catch(err => {
+      const isHttps = window.location.protocol === 'https:';
       document.getElementById('qr-status').textContent =
         'Camera access failed: ' + err.message +
-        ' (on iPhone, this page usually needs to be loaded over https:// for camera access to work)';
+        (isHttps
+          ? ''
+          : ' — this page is loaded over http://, which iPhone blocks camera access on. Ask your admin to set up HTTPS (see HTTPS_Setup.md), then reload this page at https://' + window.location.host + window.location.pathname);
     });
 }
 
@@ -3258,7 +3262,24 @@ if __name__ == '__main__':
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name='monitor')
     monitor_thread.start()
 
-    log.info('Dashboard: http://0.0.0.0:5000  |  Floor: http://0.0.0.0:5000/floor')
+    # ── HTTPS (optional, needed for camera scanning on iPhone) ─────────────
+    # If cert.pem/key.pem exist next to this script, serve over HTTPS so the
+    # QR/barcode scanner's camera access works on phones that require a
+    # secure context (notably iPhone Safari). See HTTPS_Setup.md for how to
+    # generate them. Falls back to plain HTTP if they're not present — the
+    # rest of the dashboard works identically either way, only the camera
+    # scan button needs this.
+    _cert_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cert.pem')
+    _key_path  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'key.pem')
+
     import logging as _logging
     _logging.getLogger('werkzeug').setLevel(_logging.ERROR)
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+    if os.path.exists(_cert_path) and os.path.exists(_key_path):
+        log.info('Dashboard: https://0.0.0.0:5000  |  Floor: https://0.0.0.0:5000/floor  (HTTPS — cert.pem found)')
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False,
+                ssl_context=(_cert_path, _key_path))
+    else:
+        log.info('Dashboard: http://0.0.0.0:5000  |  Floor: http://0.0.0.0:5000/floor  '
+                  '(plain HTTP — camera scanning will not work on iPhone until cert.pem/key.pem exist; see HTTPS_Setup.md)')
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
