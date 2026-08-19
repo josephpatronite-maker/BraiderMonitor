@@ -803,9 +803,14 @@ def hires_loop():
         pv  = d.get('servoPuller_Axis.ActualVelocity')
         cv  = d.get('servoPuller_Axis.CommandVelocity')
         st  = d.get('Machine_State')
+        with _operator_lock:
+            serial_number = _operator_input['serial_number']
+            layer_number  = _operator_input['layer_number']
         return {
             'Timestamp':           ts(),
             'Braider_ID':          BRAIDER_ID,
+            'Serial_Number':       serial_number,
+            'Layer_Number':        layer_number,
             'Machine_State':       st,
             'State_Name':          state_name(st) if st else '',
             'Wire_Break_Detected': d.get('WIre_Break_Detected'),
